@@ -69,14 +69,16 @@ class SimResult:
         t = self.header["Frames"] * self.header["FrameTime"] / self.freq_hz
         return [len(m) / t / 1e3 for m in self.macrotimes]
 
-    def save_sim(self, path, irf=None, scatter=None):
+    def save_sim(self, path, irf=None, scatter=None, **kwargs):
         """Write a ``.sim`` file that PAM loads ("Pam Simulation Files").
 
         In advanced mode Sim.m also writes ``*_irf.sim`` (and ``*_scat.sim``
         when noise is on); ``irf``/``scatter`` default to doing the same.
+        Very large results are split into ``*_partNN.sim`` files (see
+        :func:`pamsim.io.save_sim`).  Returns the list of written files.
         """
         from .io import save_sim
-        return save_sim(self, path, irf=irf, scatter=scatter)
+        return save_sim(self, path, irf=irf, scatter=scatter, **kwargs)
 
     def save_npz(self, path):
         from .io import save_npz

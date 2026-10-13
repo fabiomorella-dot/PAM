@@ -190,7 +190,7 @@ MT19937 streams are not reproduced (see below).
 | moving maps (types 6/7) | particle moved to the 1-based pixel index of the nearest matching pixel (1 px off; error if none exists) | pixel centre of the nearest matching pixel; unchanged if none exists | |
 | map cropping | 2nd dimension cropped to `BS(1)` | cropped to `BS(2)` | typo in Sim.m |
 | output | unsorted per particle in the workspace, sorted in `.sim` | always sorted, plus `labels` per photon | |
-| `.sim` file | MAT `-v7.3` (HDF5) | MAT v5 (read by PAM's `LoadTcspc` the same way; ≤ 2 GB per variable – use `save_npz` beyond that) | |
+| `.sim` file | MAT `-v7.3` (HDF5) | MAT v5 (read by PAM's `LoadTcspc` the same way). A v5 variable must stay below 4 GB, so results above ~350 million photons are split in time into `<name>_part01.sim`, `_part02.sim`, … – select all parts together in PAM | |
 
 Reproduced as in Sim.m (properties of the original, not bugs of the port):
 basic-mode microtimes are `laser·16384 + 1 + Σ lifetimes` while the header says

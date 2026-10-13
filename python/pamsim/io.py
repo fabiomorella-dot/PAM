@@ -3,8 +3,8 @@
 ``save_sim`` writes the same variables as Sim.m (``Sim_Photons`` and
 ``Header``), so the file opens in PAM via *Load TCSPC data -> Pam Simulation
 Files*.  Sim.m saves with ``-v7.3``; here a MATLAB v5 MAT file is written,
-which ``load(...,'-mat')`` in PAM reads just the same (limit: 2 GB per
-variable - use :func:`save_npz` for larger data).
+which ``load(...,'-mat')`` in PAM reads just the same.  A v5 variable must
+stay below 4 GB, so very large results are split into several files.
 """
 
 from __future__ import annotations
@@ -93,18 +93,73 @@ def _write(path, mts, mis, header):
             appendmat=False, do_compression=True, oned_as="column")
 
 
-def save_sim(result, path, irf=None, scatter=None):
-    """Write ``path`` (and ``*_irf.sim`` / ``*_scat.sim`` like Sim.m)."""
+#: A MAT v5 variable must stay below 2**32 bytes; Sim_Photons needs about
+#: 10 bytes per photon (float64 macrotime + uint16 microtime).
+MAX_SIM_BYTES = 3.5e9
+
+
+def _split_parts(result, max_bytes):
+    """Cut the photons into time blocks that each fit into one MAT v5 file.
+
+    Returns a list of (macrotimes, microtimes, header) per part.  Parts are
+    whole frames where possible (else equal time blocks); macrotimes start
+    at 0 in every part, so PAM can load all parts together as consecutive files.
+    """
+    n_bytes = sum(m.size * 10 + 256 for m in result.macrotimes)
+    n_parts = max(1, int(np.ceil(n_bytes / max_bytes)))
+    h0 = result.header
+    frames, frame_ticks = int(h0["Frames"]), float(h0["FrameTime"])
+    if n_parts == 1:
+        return [(result.macrotimes, result.microtimes, h0)]
+    if frames >= n_parts:
+        per = int(np.ceil(frames / n_parts))
+        blocks = [(k * per, min(frames, (k + 1) * per)) for k in range(int(np.ceil(frames / per)))]
+        edges = [(a * frame_ticks, b * frame_ticks, b - a, frame_ticks) for a, b in blocks]
+    else:
+        total = frames * frame_ticks
+        length = np.ceil(total / n_parts)
+        edges = [(k * length, min(total, (k + 1) * length), 1, min(total, (k + 1) * length) - k * length)
+                 for k in range(n_parts)]
+    parts = []
+    for lo, hi, n_frames, ft in edges:
+        mts, mis = [], []
+        for m, u in zip(result.macrotimes, result.microtimes):
+            a, b = np.searchsorted(m, [lo, hi], side="left")
+            mts.append(m[a:b] - lo)
+            mis.append(u[a:b])
+        h = dict(h0)
+        h["Frames"] = float(n_frames)
+        h["FrameTime"] = float(ft)
+        parts.append((mts, mis, h))
+    return parts
+
+
+def save_sim(result, path, irf=None, scatter=None, max_bytes=MAX_SIM_BYTES):
+    """Write ``path`` (and ``*_irf.sim`` / ``*_scat.sim`` like Sim.m).
+
+    Results that are too large for one MAT v5 file (more than ~350 million
+    photons) are split in time into ``<name>_part01.sim``, ``_part02.sim``,
+    ...; select all parts together when loading them in PAM.
+    Returns the list of written files.
+    """
     path = os.fspath(path)
-    written = [path]
-    _write(path, result.macrotimes, result.microtimes, result.header)
+    base = path[:-4] if path.endswith(".sim") else path
+    parts = _split_parts(result, max_bytes)
+    if len(parts) == 1:
+        written = [path]
+        _write(path, *parts[0])
+    else:
+        written = []
+        for k, (mts, mis, h) in enumerate(parts, start=1):
+            name = f"{base}_part{k:02d}.sim"
+            _write(name, mts, mis, h)
+            written.append(name)
     advanced = result.mode == "advanced"
     if irf is None:
         irf = advanced
     if scatter is None:
         scatter = advanced and result.settings.use_noise
     rng = np.random.default_rng(np.random.SeedSequence(result._kernel_info.get("seed", 0), spawn_key=(2 ** 31 + 1,)))
-    base = path[:-4] if path.endswith(".sim") else path
     if irf:
         h = dict(result.header)
         h["FrameTime"] = float(IRF_TIME_S * result.freq_hz / result.header["Frames"])

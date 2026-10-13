@@ -295,3 +295,24 @@ def test_gui_helpers(tmp_path):
     save_setup(s, tmp_path / "setup.json", seed=123)
     s2 = SimSettings.load_json(tmp_path / "setup.json")
     assert s2.seed == 123 and s2.species[0].D == 7 and s2.species[0].brightness[0] == 50 and s2.maps is None
+
+
+def test_large_sim_is_split(tmp_path):
+    for frames in (1, 6):
+        s = small(frames=frames, species=[Species(D=40, N=10, color=2, ExP=np.eye(4) * 0.3)])
+        r = simulate(s)
+        n = sum(m.size for m in r.macrotimes)
+        files = r.save_sim(tmp_path / f"big{frames}_1.sim", max_bytes=n * 10 / 2.5)  # forces 3 parts
+        assert [os.path.basename(f) for f in files] == [f"big{frames}_1_part0{k}.sim" for k in (1, 2, 3)]
+        offset, total = 0.0, 0.0
+        got = [[] for _ in range(4)]
+        for f in files:
+            mts, mis, h = load_sim(f)
+            span = h["Frames"] * h["FrameTime"]
+            for c in range(4):
+                assert np.all(mts[c] < span)
+                got[c].append(mts[c] + offset)
+            offset += span
+        assert offset == r.header["Frames"] * r.header["FrameTime"]
+        for c in range(4):
+            np.testing.assert_array_equal(np.concatenate(got[c]), r.macrotimes[c])
