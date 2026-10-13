@@ -64,7 +64,26 @@ pip install -e .            # numpy, numba, scipy;  add ".[plot,test]" for matpl
 The first simulation compiles the kernel (about 15 s); the compiled code is
 cached on disk afterwards.
 
-## Quick start
+## Graphical interface
+
+```bash
+cd python
+python run_gui.py          # or, after "pip install -e .":  pamsim-gui
+```
+
+A window modelled on Sim.m.  On the left are the general, scanning, noise and
+output settings; on the right are the species list (Add / Copy / Delete) and
+tabs for colours/focus/lifetime, the 4×4 matrices (excitation, crosstalk,
+detection, bleaching), FRET distances and dynamic rates, and advanced options
+(IRF, anisotropy, distance width, linker, maps, threads).  Choose an output
+folder and a file name and press **Start**.  Files are named like in Sim.m
+(`<name>_1.sim`, `<name>_2.sim`, ... for "Number of files" > 1; with a seed,
+file *k* uses seed + k − 1) and open in PAM via *Load TCSPC data → Pam
+Simulation Files*.  **Stop** cancels the run.  **Plot last result** shows the
+intensity trace and the auto-/cross-correlation for a quick check.  *Save /
+Load setup* stores the parameters as JSON; Sim.m's own JSON setups load too.
+
+## Quick start (scripting)
 
 ```python
 import numpy as np
@@ -133,7 +152,7 @@ inputs built directly from the Sim.m source, and compares them with pamsim:
 ```bash
 python validation/compare_kernels.py     # 9 scenarios, original vs pamsim
 python validation/check_fcs.py           # FCS fit vs theory, pamsim and original
-python -m pytest                         # 20 tests (~30 s)
+python -m pytest                         # 21 tests (~30 s)
 ```
 
 * **Simulation**: the comparison covers 1 colour; 2-colour PIE with static
@@ -183,8 +202,6 @@ excitation probability exceeds 10⁻⁴; the advanced mode writes `*_irf.sim` /
 ## Not ported
 
 * the camera simulation (scan type 5, pure MATLAB in Sim.m)
-* the GUI itself – parameters are set in Python (or loaded from the JSON that
-  Sim.m saves)
 * reading Sim.m's own `-v7.3` `.sim` files (re-save them with `-v7` in MATLAB)
 
 ## Layout
@@ -196,6 +213,7 @@ pamsim/simulate.py     Do_PointSim: input preparation, threads, noise, channels
 pamsim/params.py       SimSettings / Species (Sim.m parameters)
 pamsim/correlation.py  CrossCorrelation.m + Do_CCF.c
 pamsim/io.py           .sim / .npz output, IRF and scatter files
+pamsim/gui.py          graphical interface (tkinter), started by run_gui.py
 validation/            builds and runs PAM's original kernels for comparison
 benchmarks/, examples/, tests/
 ```

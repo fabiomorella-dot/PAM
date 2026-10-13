@@ -205,11 +205,12 @@ def simulate_particle(
         dyn_cdf, dyn_step,
         map_type, maps, dynamic_maps,
         fast_forward, ff_z, slab_lo, slab_hi, laser_ff,
-        reset_bleach_each_frame, capacity):
+        reset_bleach_each_frame, capacity, abort):
     """Simulate one particle for ``n_frames * frame_ticks`` sampling ticks.
 
     Returns (macrotimes[int64 ticks], microtimes[uint16], label[uint8],
-    polarization[uint8], final_state).  ``label`` packs
+    polarization[uint8], final_state).  Setting ``abort[0] = 1`` from another
+    thread stops the simulation early.  ``label`` packs
     laser<<6 | excited dye<<4 | emitting dye<<2 | detection channel,
     exactly as the C++ ``Channel`` output.
     """
@@ -252,7 +253,11 @@ def simulate_particle(
         if dynamic_maps and frame > 0:
             _follow_moving_map(pos, maps, frame)
         i = 0
+        loops = 0
         while i < frame_ticks:
+            loops += 1
+            if (loops & 4095) == 0 and abort[0] != 0:
+                return mt[:nph].copy(), mi_out[:nph].copy(), lab[:nph].copy(), pol_out[:nph].copy(), state
             sigma = sigma_d[state]
 
             # ---------------------------------------------- fast-forward

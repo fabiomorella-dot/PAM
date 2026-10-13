@@ -279,3 +279,19 @@ def test_load_pam_json(tmp_path):
     s.save_json(tmp_path / "py.json")
     s2 = SimSettings.load_json(tmp_path / "py.json")
     assert s2.species[0].D == 30 and s2.freq == 2000
+
+
+# ---------------------------------------------------------------- GUI helpers
+def test_gui_helpers(tmp_path):
+    pytest.importorskip("tkinter")
+    from pamsim.gui import load_map_file, save_setup
+    m = np.random.default_rng(0).random((50, 40))
+    np.save(tmp_path / "m.npy", m)
+    np.testing.assert_array_equal(load_map_file(str(tmp_path / "m.npy")), m)
+    from scipy.io import savemat
+    savemat(tmp_path / "m.mat", {"Map": np.dstack([m, m])})  # MATLAB: frames in 3rd dim
+    assert load_map_file(str(tmp_path / "m.mat")).shape == (2, 50, 40)
+    s = SimSettings(seed=None, maps=m, species=[Species(D=7, brightness=[50] * 4)])
+    save_setup(s, tmp_path / "setup.json", seed=123)
+    s2 = SimSettings.load_json(tmp_path / "setup.json")
+    assert s2.seed == 123 and s2.species[0].D == 7 and s2.species[0].brightness[0] == 50 and s2.maps is None

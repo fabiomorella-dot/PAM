@@ -12,7 +12,7 @@ import os
 import sys
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Callable, List, Union
 
@@ -289,8 +289,18 @@ def _geometry(settings: SimSettings, sp_focus: Species, phys: dict, map_type, ma
 # --------------------------------------------------------------------------
 # main entry point
 # --------------------------------------------------------------------------
-def simulate(settings: SimSettings, progress: Union[bool, Callable[[int, int], None]] = False) -> SimResult:
-    """Run a point / line / raster simulation (Sim.m scan types 1-4)."""
+class SimulationCancelled(Exception):
+    """Raised by :func:`simulate` when its ``cancel`` event was set."""
+
+
+def simulate(settings: SimSettings, progress: Union[bool, Callable[[int, int], None]] = False,
+             cancel=None) -> SimResult:
+    """Run a point / line / raster simulation (Sim.m scan types 1-4).
+
+    ``progress``: True prints progress, or a callable ``f(done, total)``.
+    ``cancel``: optional ``threading.Event``; setting it stops the run and
+    raises :class:`SimulationCancelled`.
+    """
     if settings.scan_type == 5:
         raise NotImplementedError("camera simulations (scan type 5) are not ported")
     t_start = time.perf_counter()
@@ -345,8 +355,9 @@ def simulate(settings: SimSettings, progress: Union[bool, Callable[[int, int], N
             phys["dyn_cdf"], phys["dyn_step"],
             map_type, maps, dyn_maps,
             ff, float(settings.ff_z), geo["slab_lo"], geo["slab_hi"], geo["laser_ff"],
-            bool(settings.reset_bleaching_each_frame), 4096)
+            bool(settings.reset_bleaching_each_frame), 4096, abort)
 
+    abort = np.zeros(1, dtype=np.uint8)
     n_threads = settings.n_threads or os.cpu_count() or 1
     results = [None] * len(tasks)
     report = _progress_reporter(progress, len(tasks))
@@ -354,9 +365,21 @@ def simulate(settings: SimSettings, progress: Union[bool, Callable[[int, int], N
         # numba compiles thread-safely: the first call compiles, the others wait
         with ThreadPoolExecutor(max_workers=n_threads) as pool:
             futures = {pool.submit(run, t): k for k, t in enumerate(tasks)}
-            for done, fut in enumerate(as_completed(futures), start=1):
-                results[futures[fut]] = fut.result()
-                report(done)
+            pending = set(futures)
+            done = 0
+            while pending:
+                finished, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    results[futures[fut]] = fut.result()
+                    done += 1
+                    report(done)
+                if cancel is not None and cancel.is_set():
+                    abort[0] = 1
+                    for fut in pending:
+                        fut.cancel()
+                    break
+        if cancel is not None and cancel.is_set():
+            raise SimulationCancelled()
 
     out = _assemble(settings, results, advanced, simtime, mi_bins, seed)
     elapsed = time.perf_counter() - t_start
