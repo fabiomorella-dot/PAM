@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+validation/build/
+*.sim
+*.png
+*.npz

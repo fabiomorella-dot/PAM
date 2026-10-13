@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pamsim"
+version = "0.1.0"
+description = "Fast Python/numba port of the photon simulation (Sim.m) of PAM - PIE Analysis with MATLAB"
+readme = "README.md"
+license = { text = "GPL-3.0" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22", "numba>=0.57", "scipy>=1.8"]
+
+[project.optional-dependencies]
+plot = ["matplotlib"]
+test = ["pytest"]
+
+[tool.setuptools]
+packages = ["pamsim"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
