@@ -22,6 +22,12 @@ On macOS / Linux run `python/install_pamsim.sh`.
 
 Double-click **`Update_PAMsim.bat`** (or run `git pull` in this folder).
 
+## Planning simulations
+
+`planning/PAMsim_simulation_planner.xlsx` – one row per simulation plus a species
+sheet; it calculates concentrations, expected count rates, photons and memory
+and flags saturating brightness or too coarse time steps before you run anything.
+
 ## More
 
 * `python/README.md` – how the simulation works, all parameters, validation
