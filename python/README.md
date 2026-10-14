@@ -64,24 +64,41 @@ pip install -e .            # numpy, numba, scipy;  add ".[plot,test]" for matpl
 The first simulation compiles the kernel (about 15 s); the compiled code is
 cached on disk afterwards.
 
-## Graphical interface
+## Graphical interface (PAMsim app)
 
-```bash
-cd python
-python run_gui.py          # or, after "pip install -e .":  pamsim-gui
-```
+**Windows:** double-click `Install_PAMsim.bat` (repository root) once.  It
+installs the libraries and creates a **PAMsim** icon on the Desktop and in the
+Start menu.  Without installing you can double-click `PAMsim.pyw`; from a
+terminal: `python run_gui.py` (or `pamsim-gui` after `pip install -e .[gui]`).
 
-A window modelled on Sim.m.  On the left are the general, scanning, noise and
-output settings; on the right are the species list (Add / Copy / Delete) and
-tabs for colours/focus/lifetime, the 4×4 matrices (excitation, crosstalk,
-detection, bleaching), FRET distances and dynamic rates, and advanced options
-(IRF, anisotropy, distance width, linker, maps, threads).  Choose an output
-folder and a file name and press **Start**.  Files are named like in Sim.m
-(`<name>_1.sim`, `<name>_2.sim`, ... for "Number of files" > 1; with a seed,
-file *k* uses seed + k − 1) and open in PAM via *Load TCSPC data → Pam
-Simulation Files*.  **Stop** cancels the run.  **Plot last result** shows the
-intensity trace and the auto-/cross-correlation for a quick check.  *Save /
-Load setup* stores the parameters as JSON; Sim.m's own JSON setups load too.
+The window is organised in three steps:
+
+1. **Measurement** – box, sampling frequency, time, scanning, background.
+2. **Molecules** – the species list (Add / Copy / Delete) and, per species, D,
+   number of molecules (the concentration is shown) and brightness per colour
+   (0 = dye not present).  The tabs hold focus/lifetime/anisotropy per colour,
+   the excitation / crosstalk / detection / bleaching matrices, FRET distances
+   and dynamic rates, and advanced options (IRF, distance width, linker, maps,
+   CPU cores).
+3. **Output** – folder, file name, number of files, format.
+
+* **Presets** (top right): 1-colour FCS, 2- and 3-colour FCCS with PIE,
+  smFRET bursts.
+* **Check** tab: updates live and warns about settings that bias the result.
+  Examples are a brightness close to the sampling frequency (saturated
+  focus), diffusion steps that are too coarse, or a box that is too small.
+  It also predicts the count rate per channel and the memory needed,
+  including for saturated foci.
+* Every field has a tooltip.  **Help** gives a short guide.
+* **Start / Stop**, progress bar, **Plot result** (trace plus all auto- and
+  cross-correlations), **Open folder**.
+* The last setup and output folder are restored at the next start.  *Save /
+  Open setup* store setups as JSON, and setups saved by Sim.m open too.
+
+Files are named like in Sim.m (`<name>_1.sim`, `<name>_2.sim`, ...; with a
+seed, file *k* uses seed + k − 1) and open in PAM via *Load TCSPC data → Pam
+Simulation Files*.  Very large results are split into `<name>_1_part01.sim`,
+`_part02.sim`, ...: select all parts together in PAM.
 
 ## Quick start (scripting)
 
@@ -152,7 +169,7 @@ inputs built directly from the Sim.m source, and compares them with pamsim:
 ```bash
 python validation/compare_kernels.py     # 9 scenarios, original vs pamsim
 python validation/check_fcs.py           # FCS fit vs theory, pamsim and original
-python -m pytest                         # 21 tests (~30 s)
+python -m pytest                         # 23 tests (~1 min)
 ```
 
 * **Simulation**: the comparison covers 1 colour; 2-colour PIE with static
@@ -213,7 +230,9 @@ pamsim/simulate.py     Do_PointSim: input preparation, threads, noise, channels
 pamsim/params.py       SimSettings / Species (Sim.m parameters)
 pamsim/correlation.py  CrossCorrelation.m + Do_CCF.c
 pamsim/io.py           .sim / .npz output, IRF and scatter files
-pamsim/gui.py          graphical interface (tkinter), started by run_gui.py
+pamsim/gui.py          PAMsim window (tkinter + sv-ttk theme): presets, live checks
+pamsim/shortcut.py     creates the Desktop / Start menu shortcuts
+PAMsim.pyw             double-click launcher (no console window)
 validation/            builds and runs PAM's original kernels for comparison
 benchmarks/, examples/, tests/
 ```

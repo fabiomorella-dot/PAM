@@ -6,3 +6,4 @@ validation/build/
 *.sim
 *.png
 *.npz
+!pamsim/assets/*.png

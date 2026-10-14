@@ -1,9 +1,10 @@
-"""Graphical interface for pamsim, modelled on PAM's Sim.m window.
+"""PAMsim - graphical interface for pamsim, modelled on PAM's Sim.m window.
 
-Start with   python -m pamsim.gui   (or   python run_gui.py   in the python
-folder).  Set the parameters, choose an output folder and press Start: the
-simulated files (``<name>_1.sim``, ``<name>_2.sim``, ...) open in PAM via
-Load TCSPC data -> "Pam Simulation Files".
+Start it by double-clicking ``PAMsim.pyw`` (or the desktop shortcut made by
+``Install_PAMsim.bat``), or with ``python -m pamsim.gui``.  Pick a preset or
+set the parameters, choose an output folder and press Start: the simulated
+files (``<name>_1.sim``, ...) open in PAM via Load TCSPC data -> "Pam
+Simulation Files".
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import copy
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -23,6 +25,8 @@ import numpy as np
 from .params import SimSettings, Species
 from .simulate import SimulationCancelled, simulate
 
+APP = "PAMsim"
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 SCAN_TYPES = ["Point measurement", "Raster scan", "Line scan", "Circle scan (simulated as point)"]
 FRET_TYPES = ["No FRET", "Static FRET", "Dynamic FRET"]
 BARRIERS = ["1: Free diffusion", "2: Quenching map", "3: Restricted zones",
@@ -37,6 +41,59 @@ MATRICES = {
 COLOR_COLUMNS = [("Brightness", "kHz"), ("wr", "nm"), ("wz", "nm"), ("dX", "nm"), ("dY", "nm"),
                  ("dZ", "nm"), ("Lifetime", "ns"), ("r0", ""), ("rho", "ns"), ("r_inf", "")]
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]  # validated categorical slots 1-4
+INK2 = "#5d5c58"
+LEVEL_COLORS = {"ok": "#0c7a0c", "info": "#2a62a8", "warn": "#a35a00", "error": "#c0302f"}
+LEVEL_ICONS = {"ok": "✔", "info": "ℹ", "warn": "⚠", "error": "✖"}
+
+TIPS = {
+    "bs": "Size of the simulation box in nm. Particles leaving it re-enter on the other side.\n"
+          "Set z = 0 for a 2D (membrane) simulation. Keep it several focus sizes large.",
+    "freq": "Sampling frequency of the random walk in kHz (time step = 1/frequency).\n"
+            "The brightness of a molecule must stay well below this value.",
+    "time": "Total simulated measurement time in seconds.",
+    "frames": "Number of frames. Relevant for scanning; for point measurements 1 is fine.",
+    "seed": "Random seed. Leave empty for a new random simulation each time;\n"
+            "set a number to reproduce a simulation exactly.",
+    "mirange": "Microtime (TCSPC) range in ns, i.e. the PIE period of all lasers together.",
+    "scan": "Point measurement = FCS/FCCS/smFRET. Raster and line scans move the focus (RICS, pCF).",
+    "px": "Number of pixels per line and lines per frame (scanning only).",
+    "sz": "Pixel size and line distance in nm (scanning only).",
+    "tpx": "Pixel dwell time in us and line time in ms (scanning only).",
+    "noise": "Uncorrelated background count rate per detection channel in kHz.",
+    "D": "Diffusion coefficient in um^2/s (e.g. ~400 for a free dye, ~30-100 for proteins).",
+    "N": "Number of molecules of this species in the whole box. The concentration is shown next to it.",
+    "colors": "Number of colours/dyes of the setup (lasers and detection channels in PIE).",
+    "fret": "FRET between the dyes of this species. 'Dynamic' switches between species (states).",
+    "map": "Barrier or quenching map (needs a map file on the Advanced tab).",
+    "brightness": "Molecular brightness per colour in kHz = count rate of one molecule in the focus centre.\n"
+                  "0 means the species carries no dye of this colour. Keep it < 10% of the sampling frequency.",
+    "folder": "Folder where the .sim files are written.",
+    "name": "File name; files are called <name>_1.sim, <name>_2.sim, ...",
+    "nfiles": "Number of independent simulations with the same parameters (each saved as its own file).",
+    "threads": "Number of CPU cores used.",
+    "ff": "Skips the random walk while a molecule is far from the focus (exact up to ~1e-12). Much faster.",
+}
+
+HELP_TEXT = """How to simulate data for PAM
+
+1.  Start from a preset (top right) or load a setup.
+2.  Measurement (left): box size, sampling frequency, time.
+3.  Molecules (middle): one entry per species.  For each species set D, the
+    number of molecules N and the brightness per colour (0 = dye not present).
+    Several species = a mixture; for FCCS give a species brightness in two or
+    three colours (a double/triple labelled complex).
+4.  Check (right) warns about settings that would bias the result, for
+    example a brightness close to the sampling frequency.
+5.  Choose an output folder and press Start.
+6.  In PAM: Load TCSPC data -> file type "Pam Simulation Files" -> select the
+    .sim file(s).  Each colour is one detection channel (1, 2, 3, ...); with
+    anisotropy, channels 5-8 are the perpendicular channels.
+
+Very large simulations are split into <name>_part01.sim, _part02.sim, ...:
+select all parts together when loading them in PAM.
+
+Units: nm (sizes), um^2/s (D), kHz (brightness, noise, frequency),
+ns (lifetime, microtime range), ps (IRF width), 1/ms (dynamic rates)."""
 
 
 def _f(text, name):
@@ -47,207 +104,437 @@ def _f(text, name):
 
 
 def _fmt(v):
-    v = float(v)
-    return f"{v:g}"
+    return f"{float(v):g}"
+
+
+def config_dir():
+    base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    path = os.path.join(base, "pamsim")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+# --------------------------------------------------------------------------
+# presets and checks (no Tk needed - also used by the tests)
+# --------------------------------------------------------------------------
+def _sp(name, brightness, D, N, color, **kw):
+    b = list(brightness) + [0.0] * (4 - len(brightness))
+    return Species(name=name, color=color, D=D, N=N, brightness=b, LT=[4, 3, 2, 2], **kw)
+
+
+def presets():
+    """Ready-made setups: name -> SimSettings."""
+    out = {}
+    out["1-colour FCS"] = SimSettings(name="fcs", sim_time=30, frames=1, species=[_sp("dye", [100], 100, 50, 1)])
+    out["2-colour FCCS (PIE)"] = SimSettings(name="fccs_2c", sim_time=30, frames=1, mi_range=50, species=[
+        _sp("green-red complex", [100, 70], 50, 300, 2),
+        _sp("green only", [100, 0], 50, 200, 2),
+        _sp("red only", [0, 70], 50, 200, 2)])
+    out["3-colour FCCS (PIE)"] = SimSettings(name="fccs_3c", sim_time=30, frames=1, mi_range=60, species=[
+        _sp("triple complex", [100, 70, 50], 35, 300, 3),
+        _sp("blue-green", [100, 70, 0], 35, 200, 3),
+        _sp("green-red", [0, 70, 50], 35, 200, 3),
+        _sp("blue-red", [100, 0, 50], 35, 200, 3)])
+    R = np.zeros((4, 4)); R[1, 0] = 50.0
+    out["smFRET bursts (PIE, IRF)"] = SimSettings(
+        name="smfret", sim_time=60, frames=1, mi_range=50, use_irf=True, irf_width=200,
+        species=[_sp("FRET species", [200, 150], 100, 3, 2, fret=2, R=R)])
+    return out
+
+
+def _emission_volume(p_max, wr, wz, is3d):
+    """Integral of min(1, p_max * exp(-u)) over the focus, u = 2r^2/wr^2 (+ 2z^2/wz^2).
+
+    p_max = brightness / sampling frequency (excitation probability per tick in
+    the focus centre).  Photons are only generated where p > 1e-4 (as in the
+    C++ kernel).  Saturation (p_max > 1) is included, so this also predicts the
+    count rate of over-bright molecules.
+    """
+    if p_max <= 1e-4:
+        return 0.0
+    u_max = np.log(p_max / 1e-4)
+    u = np.linspace(0.0, u_max, 4000)
+    p = np.minimum(1.0, p_max * np.exp(-u))
+    dv = (2 * np.pi * wr * wr * wz / 2 ** 1.5 * np.sqrt(u)) if is3d else np.full_like(u, np.pi * wr * wr / 2)
+    return float(np.trapezoid(p * dv, u)) if hasattr(np, "trapezoid") else float(np.trapz(p * dv, u))
+
+
+def check_settings(s: SimSettings, folder=None):
+    """Plausibility checks shown in the GUI: list of (level, message)."""
+    msgs = []
+    freq = float(s.freq)
+    advanced = s.advanced
+    if folder is not None and not os.path.isdir(folder):
+        msgs.append(("error", "Output folder does not exist."))
+    if freq <= 0 or s.sim_time <= 0:
+        msgs.append(("error", "Sampling frequency and simulation time must be > 0."))
+        return msgs
+    box = np.asarray(s.box_size, float)
+    is3d = box[2] > 0
+    vol_nm3 = np.prod(box if is3d else box[:2])
+    rates = np.zeros(4)
+    for sp in s.species:
+        bright = sp.brightness if sp.brightness is not None else np.diag(sp.ExP) * freq
+        for c in range(sp.color):
+            b = float(bright[c])
+            if b <= 0:
+                continue
+            ratio = b / freq
+            if ratio >= 1:
+                msgs.append(("error", f"{sp.name}: brightness {b:g} kHz (colour {c + 1}) >= sampling frequency "
+                                      f"{freq:g} kHz. Excitation saturates completely: D and c will be wrong. "
+                                      f"Lower the brightness or raise the frequency."))
+            elif ratio > 0.1:
+                msgs.append(("warn", f"{sp.name}: brightness {b:g} kHz (colour {c + 1}) is {100 * ratio:.0f}% of "
+                                     f"the sampling frequency; the focus starts to saturate (keep < 10%)."))
+            wr, wz = float(sp.wr[c]), float(sp.wz[c])
+            if wr > 0 and wz > 0:
+                rates[c] += sp.N / vol_nm3 * freq * _emission_volume(ratio, wr, wz, is3d)
+        if sp.D > 0:
+            step = np.sqrt(2 * sp.D * 1e6 / (freq * 1e3))
+            wr_min = float(np.min(sp.wr[:sp.color]))
+            if wr_min > 0 and step > 0.1 * wr_min:
+                msgs.append(("warn", f"{sp.name}: one diffusion step is {step:.0f} nm (> 10% of wr = {wr_min:g} nm). "
+                                     f"Raise the sampling frequency for accurate fast diffusion."))
+        wr_max = float(np.max(sp.wr[:sp.color])); wz_max = float(np.max(sp.wz[:sp.color]))
+        if min(box[:2]) < 8 * wr_max or (is3d and box[2] < 3 * wz_max):
+            msgs.append(("warn", f"{sp.name}: the box is small compared with the focus "
+                                 f"(use >= 8 wr laterally and >= 3 wz axially)."))
+    if s.use_noise:
+        rates += np.asarray(s.noise, float)
+    n_ph = rates.sum() * 1e3 * s.sim_time
+    mem_gb = n_ph * 12 / 1e9
+    chans = ", ".join(f"{r:.3g}" for r in rates[:max(sp.color for sp in s.species)])
+    msgs.append(("info", f"Expected count rates: {chans} kHz  ->  ~{n_ph / 1e6:.3g} M photons, "
+                         f"~{max(mem_gb, 0.001):.2g} GB of memory per file."))
+    if mem_gb > 8:
+        msgs.append(("warn", "Very large result: shorten the time and use 'Number of files' instead "
+                             "(each file is simulated and saved on its own)."))
+    if n_ph * 10 > 3.5e9:
+        msgs.append(("info", "The result will be saved in several parts (<name>_partNN.sim); "
+                             "load all parts together in PAM."))
+    if advanced:
+        msgs.append(("info", "Advanced kernel (IRF / anisotropy / distance width / linker / dynamics): "
+                             "species are states of one molecule; focus and map from species 1."))
+    if any(sp.fret == 3 for sp in s.species) and (len(s.species) < 2 or s.dynamic_rates is None):
+        msgs.append(("warn", "Dynamic FRET needs >= 2 species and non-zero rates (FRET / dynamics tab)."))
+    if any(sp.barrier != 1 for sp in s.species) and s.maps is None:
+        msgs.append(("warn", "A map type is selected but no map is loaded: free diffusion will be used."))
+    if not any(m[0] in ("warn", "error") for m in msgs):
+        msgs.insert(0, ("ok", "Settings look good."))
+    return msgs
+
+
+# --------------------------------------------------------------------------
+# small widgets
+# --------------------------------------------------------------------------
+class Tooltip:
+    def __init__(self, widget, text):
+        self.widget, self.text, self.tip, self.job = widget, text, None, None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _e=None):
+        self.job = self.widget.after(450, self._show)
+
+    def _show(self):
+        if self.tip:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(self.tip, text=self.text, justify="left", background="#fffbe6", foreground="#222",
+                 relief="solid", borderwidth=1, padx=6, pady=4, wraplength=460).pack()
+
+    def _hide(self, _e=None):
+        if self.job:
+            self.widget.after_cancel(self.job)
+            self.job = None
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
+def tip(widget, key):
+    if key in TIPS:
+        Tooltip(widget, TIPS[key])
+    return widget
 
 
 class SimGUI:
-    def __init__(self, root):
+    def __init__(self, root, restore=True):
         self.root = root
-        root.title("pamsim - Simulate photon data")
-        self.settings = SimSettings(seed=None, species=[Species()])
+        root.title(f"{APP} - photon simulation for PAM")
+        self.settings = presets()["1-colour FCS"]
+        self.settings.seed = None
         self.sel = 0
         self.matrix_key = list(MATRICES)[0]
         self.queue = queue.Queue()
         self.cancel = None
         self.worker = None
         self.last_result = None
-        self.v = {}  # general variables
+        self.last_files = []
+        self.v = {}
+        self._check_job = None
+        self._loading = False
+        self._setup_style()
+        self._set_icon()
 
-        style = ttk.Style(root)
-        if sys.platform.startswith("linux") and "clam" in style.theme_names():
-            style.theme_use("clam")
-        style.configure("Head.TLabel", font=("TkDefaultFont", 10, "bold"))
-
-        main = ttk.Frame(root, padding=6)
-        main.pack(fill="both", expand=True)
-        left = ttk.Frame(main)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        right = ttk.Frame(main)
-        right.grid(row=0, column=1, sticky="nsew")
-        bottom = ttk.Frame(main)
-        bottom.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
-        main.columnconfigure(1, weight=1)
-        main.rowconfigure(1, weight=1)
-
-        self._build_general(left)
+        outer = self._scrollable(root)
+        self._build_header(outer)
+        body = ttk.Frame(outer)
+        body.pack(fill="both", expand=True, pady=(8, 0))
+        left = ttk.Frame(body); left.grid(row=0, column=0, sticky="nsew")
+        right = ttk.Frame(body); right.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+        self._build_measurement(left)
+        self._build_output(left)
         self._build_species(right)
-        self._build_run(bottom)
-        self._load_general()
-        self._refresh_species_list()
-        self._load_species()
-        root.after(100, self._poll)
+        self._build_run(right)
 
-    # ------------------------------------------------------------- widgets
+        state = self._read_state() if restore else None
+        if state:
+            self._apply_state(state)
+        else:
+            self._load_all()
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
+        root.after(100, self._poll)
+        self._schedule_check()
+        self._fit_to_screen()
+
+    def _scrollable(self, root):
+        """Content frame inside a canvas: scrollbars appear when the screen is too small."""
+        self.canvas = tk.Canvas(root, highlightthickness=0, borderwidth=0, background=self._bg())
+        vs = ttk.Scrollbar(root, orient="vertical", command=self.canvas.yview)
+        hs = ttk.Scrollbar(root, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        hs.grid(row=1, column=0, sticky="ew")
+        vs.grid_remove()
+        hs.grid_remove()
+        root.rowconfigure(0, weight=1)
+        root.columnconfigure(0, weight=1)
+        outer = ttk.Frame(self.canvas, padding=(10, 8, 10, 10))
+        win = self.canvas.create_window(0, 0, window=outer, anchor="nw")
+
+        def resize(_e=None):
+            self.canvas.configure(scrollregion=(0, 0, outer.winfo_reqwidth(), outer.winfo_reqheight()))
+            # stretch the content when the window is larger than needed
+            self.canvas.itemconfigure(win, width=max(outer.winfo_reqwidth(), self.canvas.winfo_width()),
+                                      height=max(outer.winfo_reqheight(), self.canvas.winfo_height()))
+            need_v = outer.winfo_reqheight() > self.canvas.winfo_height() + 1
+            need_h = outer.winfo_reqwidth() > self.canvas.winfo_width() + 1
+            (vs.grid if need_v else vs.grid_remove)()
+            (hs.grid if need_h else hs.grid_remove)()
+        outer.bind("<Configure>", resize)
+        self.canvas.bind("<Configure>", resize)
+
+        def wheel(e):
+            if outer.winfo_reqheight() > self.canvas.winfo_height():
+                self.canvas.yview_scroll(int(-e.delta / 120) if e.delta else (1 if e.num == 5 else -1), "units")
+        root.bind_all("<MouseWheel>", lambda e: None if isinstance(e.widget, tk.Text) else wheel(e), add="+")
+        root.bind_all("<Button-4>", wheel, add="+")
+        root.bind_all("<Button-5>", wheel, add="+")
+        self._outer = outer
+        return outer
+
+    def _fit_to_screen(self):
+        self.root.update_idletasks()
+        w = self._outer.winfo_reqwidth() + 24
+        h = self._outer.winfo_reqheight() + 24
+        sw = self.root.winfo_screenwidth() - 40
+        sh = self.root.winfo_screenheight() - 90  # task bar and title bar
+        self.root.geometry(f"{min(w, sw)}x{min(h, sh)}+10+10")
+        self.root.minsize(min(w, 900), min(h, 500))
+
+    # ------------------------------------------------------------- look
+    def _setup_style(self):
+        style = ttk.Style(self.root)
+        try:
+            import sv_ttk
+            sv_ttk.set_theme("light")
+            self.themed = True
+        except Exception:  # noqa: BLE001 - theme is optional
+            self.themed = False
+            if "vista" in style.theme_names():
+                style.theme_use("vista")
+            elif "clam" in style.theme_names():
+                style.theme_use("clam")
+            style.configure("Accent.TButton", font=("TkDefaultFont", 10, "bold"))
+        base = "Segoe UI" if sys.platform == "win32" else "TkDefaultFont"
+        style.configure("Title.TLabel", font=(base, 17, "bold"))
+        style.configure("Sub.TLabel", foreground=INK2)
+        style.configure("Head.TLabel", font=(base, 10, "bold"))
+        style.configure("Hint.TLabel", foreground=INK2)
+        style.configure("Big.Accent.TButton", font=(base, 11, "bold"), padding=(18, 8))
+
+    def _set_icon(self):
+        try:
+            self._icon = tk.PhotoImage(file=os.path.join(ASSETS, "pamsim.png"))
+            self.root.iconphoto(True, self._icon)
+            if sys.platform == "win32":
+                self.root.iconbitmap(default=os.path.join(ASSETS, "pamsim.ico"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ------------------------------------------------------------- layout
     def _var(self, key, value=""):
         self.v[key] = tk.StringVar(value=value)
+        self.v[key].trace_add("write", lambda *a: self._schedule_check())
         return self.v[key]
 
-    def _row(self, parent, row, label, keys, unit="", width=8):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=2, pady=1)
+    def _row(self, parent, row, label, keys, unit="", width=7, tipkey=None):
+        lab = ttk.Label(parent, text=label)
+        lab.grid(row=row, column=0, sticky="w", padx=(0, 6), pady=2)
+        tip(lab, tipkey)
         for i, k in enumerate(keys):
-            ttk.Entry(parent, textvariable=self._var(k), width=width).grid(row=row, column=1 + i, padx=1, pady=1)
-        ttk.Label(parent, text=unit).grid(row=row, column=4, sticky="w", padx=2)
+            e = ttk.Entry(parent, textvariable=self._var(k), width=width)
+            e.grid(row=row, column=1 + i, padx=1, pady=2, sticky="w")
+            tip(e, tipkey)
+        ttk.Label(parent, text=unit, style="Hint.TLabel").grid(row=row, column=4, sticky="w", padx=(4, 0))
 
-    def _build_general(self, parent):
-        g = ttk.LabelFrame(parent, text="General", padding=4)
+    def _build_header(self, parent):
+        h = ttk.Frame(parent)
+        h.pack(fill="x")
+        try:
+            self._logo = tk.PhotoImage(file=os.path.join(ASSETS, "pamsim.png")).subsample(5, 5)
+            ttk.Label(h, image=self._logo).pack(side="left", padx=(0, 10))
+        except Exception:  # noqa: BLE001
+            pass
+        t = ttk.Frame(h)
+        t.pack(side="left")
+        ttk.Label(t, text=APP, style="Title.TLabel").pack(anchor="w")
+        ttk.Label(t, text="Fast photon simulation for PAM  -  writes .sim files for Load TCSPC data",
+                  style="Sub.TLabel").pack(anchor="w")
+        r = ttk.Frame(h)
+        r.pack(side="right")
+        ttk.Button(r, text="Help", command=self._help).pack(side="right", padx=(6, 0))
+        ttk.Button(r, text="Save setup...", command=self._save_setup).pack(side="right", padx=(6, 0))
+        ttk.Button(r, text="Open setup...", command=self._load_setup).pack(side="right", padx=(6, 0))
+        ttk.Separator(r, orient="vertical").pack(side="right", fill="y", padx=8)
+        ttk.Button(r, text="Apply", command=self._apply_preset).pack(side="right", padx=(6, 0))
+        self.preset_cb = ttk.Combobox(r, values=list(presets()), state="readonly", width=24)
+        self.preset_cb.set("Start from a preset...")
+        self.preset_cb.pack(side="right")
+
+    def _build_measurement(self, parent):
+        ttk.Label(parent, text="1  Measurement", style="Head.TLabel").pack(anchor="w", pady=(0, 4))
+        g = ttk.LabelFrame(parent, text="General", padding=8)
         g.pack(fill="x")
-        self._row(g, 0, "Box size (x, y, z)", ["bs0", "bs1", "bs2"], "nm  (z = 0: 2D)")
-        self._row(g, 1, "Sampling frequency", ["freq"], "kHz")
-        self._row(g, 2, "Simulation time", ["time"], "s")
-        self._row(g, 3, "Frames", ["frames"])
-        self._row(g, 4, "Seed", ["seed"], "empty = random")
-        self._row(g, 5, "Microtime range", ["mirange"], "ns")
+        self._row(g, 0, "Box size x, y, z", ["bs0", "bs1", "bs2"], "nm", width=6, tipkey="bs")
+        self._row(g, 1, "Sampling frequency", ["freq"], "kHz", tipkey="freq")
+        self._row(g, 2, "Simulation time", ["time"], "s", tipkey="time")
+        self._row(g, 3, "Frames", ["frames"], tipkey="frames")
+        self._row(g, 4, "Microtime range", ["mirange"], "ns", tipkey="mirange")
+        self._row(g, 5, "Seed", ["seed"], "empty = random", tipkey="seed")
 
-        s = ttk.LabelFrame(parent, text="Scanning", padding=4)
-        s.pack(fill="x", pady=(4, 0))
-        ttk.Label(s, text="Scan type").grid(row=0, column=0, sticky="w", padx=2)
-        self.scan_cb = ttk.Combobox(s, values=SCAN_TYPES, state="readonly", width=30)
-        self.scan_cb.grid(row=0, column=1, columnspan=3, sticky="w", pady=1)
-        self._row(s, 1, "Pixels / lines", ["px0", "px1"])
-        self._row(s, 2, "Pixel size (x, y)", ["sz0", "sz1"], "nm")
-        self._row(s, 3, "Pixel time, line time", ["t0", "t1"], "us, ms")
+        s = ttk.LabelFrame(parent, text="Scanning", padding=8)
+        s.pack(fill="x", pady=(8, 0))
+        lab = ttk.Label(s, text="Scan type"); lab.grid(row=0, column=0, sticky="w", padx=(0, 6)); tip(lab, "scan")
+        self.scan_cb = ttk.Combobox(s, values=SCAN_TYPES, state="readonly", width=26)
+        self.scan_cb.grid(row=0, column=1, columnspan=3, sticky="w", pady=2)
+        self.scan_cb.bind("<<ComboboxSelected>>", lambda e: self._update_scan_state())
+        self.scan_rows = ttk.Frame(s)
+        self.scan_rows.grid(row=1, column=0, columnspan=5, sticky="w")
+        self._row(self.scan_rows, 0, "Pixels / lines", ["px0", "px1"], width=7, tipkey="px")
+        self._row(self.scan_rows, 1, "Pixel size x, y", ["sz0", "sz1"], "nm", width=7, tipkey="sz")
+        self._row(self.scan_rows, 2, "Pixel / line time", ["t0", "t1"], "us, ms", width=7, tipkey="tpx")
 
-        n = ttk.LabelFrame(parent, text="Background", padding=4)
-        n.pack(fill="x", pady=(4, 0))
+        n = ttk.LabelFrame(parent, text="Background", padding=8)
+        n.pack(fill="x", pady=(8, 0))
         self.use_noise = tk.BooleanVar()
-        ttk.Checkbutton(n, text="Apply noise per channel [kHz]", variable=self.use_noise).grid(
-            row=0, column=0, columnspan=5, sticky="w")
+        self.use_noise.trace_add("write", lambda *a: self._schedule_check())
+        tip(ttk.Checkbutton(n, text="Add background per channel [kHz]", variable=self.use_noise), "noise").grid(
+            row=0, column=0, columnspan=4, sticky="w")
         for i in range(4):
-            ttk.Entry(n, textvariable=self._var(f"noise{i}"), width=7).grid(row=1, column=i, padx=1)
-
-        o = ttk.LabelFrame(parent, text="Output", padding=4)
-        o.pack(fill="x", pady=(4, 0))
-        ttk.Label(o, text="Folder").grid(row=0, column=0, sticky="w")
-        ttk.Entry(o, textvariable=self._var("folder", os.getcwd()), width=28).grid(row=0, column=1, columnspan=2, sticky="we")
-        ttk.Button(o, text="...", width=3, command=self._choose_folder).grid(row=0, column=3)
-        ttk.Label(o, text="File name").grid(row=1, column=0, sticky="w")
-        ttk.Entry(o, textvariable=self._var("name"), width=20).grid(row=1, column=1, sticky="w")
-        ttk.Label(o, text="Number of files").grid(row=2, column=0, sticky="w")
-        ttk.Entry(o, textvariable=self._var("nfiles", "1"), width=6).grid(row=2, column=1, sticky="w")
-        ttk.Label(o, text="Format").grid(row=3, column=0, sticky="w")
-        self.fmt = ttk.Combobox(o, values=[".sim (PAM)", ".npz (numpy)", "both"], state="readonly", width=14)
-        self.fmt.current(0)
-        self.fmt.grid(row=3, column=1, sticky="w")
-        self.save_setup = tk.BooleanVar(value=True)
-        ttk.Checkbutton(o, text="Also save the setup (.json)", variable=self.save_setup).grid(
-            row=4, column=0, columnspan=3, sticky="w")
-        b = ttk.Frame(parent)
-        b.pack(fill="x", pady=(4, 0))
-        ttk.Button(b, text="Load setup...", command=self._load_setup).pack(side="left")
-        ttk.Button(b, text="Save setup...", command=self._save_setup).pack(side="left", padx=4)
-
-    def _build_advanced(self, parent):
-        a = ttk.LabelFrame(parent, text="Advanced (uses the DifSim_ani kernel)", padding=4)
-        a.pack(fill="x", pady=(0, 6), anchor="w")
-        self.use_irf = tk.BooleanVar(); self.use_aniso = tk.BooleanVar()
-        self.use_fw = tk.BooleanVar(); self.use_lw = tk.BooleanVar()
-        ttk.Checkbutton(a, text="IRF, width [ps]", variable=self.use_irf).grid(row=0, column=0, sticky="w")
-        ttk.Entry(a, textvariable=self._var("irf"), width=8).grid(row=0, column=1)
-        ttk.Checkbutton(a, text="Anisotropy (8 channels: par + perp)", variable=self.use_aniso).grid(
-            row=1, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(a, text="Distance width, update [ms]", variable=self.use_fw).grid(row=2, column=0, sticky="w")
-        ttk.Entry(a, textvariable=self._var("hetupd"), width=8).grid(row=2, column=1)
-        ttk.Checkbutton(a, text="Linker width", variable=self.use_lw).grid(row=3, column=0, sticky="w")
-        ttk.Entry(a, textvariable=self._var("linker"), width=8).grid(row=3, column=1)
-
-        m = ttk.LabelFrame(parent, text="Barrier / quenching map (1 px = 1 nm)", padding=4)
-        m.pack(fill="x", pady=(0, 6), anchor="w")
-        self.map_label = ttk.Label(m, text="no map loaded", width=34)
-        self.map_label.grid(row=0, column=0, sticky="w")
-        ttk.Button(m, text="Load map...", command=self._load_map).grid(row=0, column=1, padx=2)
-        ttk.Button(m, text="Clear", command=self._clear_map).grid(row=0, column=2)
-
-        p = ttk.LabelFrame(parent, text="Performance", padding=4)
-        p.pack(fill="x", pady=(0, 6), anchor="w")
-        self.ff = tk.BooleanVar(value=True)
-        ttk.Checkbutton(p, text="Fast-forward far from the focus", variable=self.ff).grid(row=0, column=0, sticky="w")
-        ttk.Label(p, text="Threads").grid(row=0, column=1, padx=(10, 2))
-        ttk.Entry(p, textvariable=self._var("threads", str(os.cpu_count() or 1)), width=4).grid(row=0, column=2)
-        self.reset_bleach = tk.BooleanVar()
-        ttk.Checkbutton(p, text="Unbleach at every frame (like Sim.m)", variable=self.reset_bleach).grid(
-            row=1, column=0, columnspan=3, sticky="w")
-
+            tip(ttk.Entry(n, textvariable=self._var(f"noise{i}"), width=6), "noise").grid(row=1, column=i, padx=1, pady=(4, 0))
 
     def _build_species(self, parent):
+        ttk.Label(parent, text="2  Molecules", style="Head.TLabel").pack(anchor="w", pady=(0, 4))
         top = ttk.Frame(parent)
         top.pack(fill="x")
-        lf = ttk.LabelFrame(top, text="Species", padding=4)
+        lf = ttk.LabelFrame(top, text="Species", padding=8)
         lf.pack(side="left", fill="y")
-        self.sp_list = tk.Listbox(lf, height=6, width=18, exportselection=False)
+        self.sp_list = tk.Listbox(lf, height=6, width=20, exportselection=False, activestyle="none",
+                                  borderwidth=1, relief="solid", highlightthickness=0,
+                                  selectbackground="#2a78d6", selectforeground="white")
         self.sp_list.grid(row=0, column=0, columnspan=3)
         self.sp_list.bind("<<ListboxSelect>>", self._on_select_species)
-        ttk.Button(lf, text="Add", width=6, command=self._add_species).grid(row=1, column=0, pady=2)
-        ttk.Button(lf, text="Copy", width=6, command=self._copy_species).grid(row=1, column=1)
-        ttk.Button(lf, text="Delete", width=6, command=self._delete_species).grid(row=1, column=2)
+        ttk.Button(lf, text="Add", width=6, command=self._add_species).grid(row=1, column=0, pady=(6, 0))
+        ttk.Button(lf, text="Copy", width=6, command=self._copy_species).grid(row=1, column=1, pady=(6, 0), padx=2)
+        ttk.Button(lf, text="Delete", width=6, command=self._delete_species).grid(row=1, column=2, pady=(6, 0))
 
-        pf = ttk.LabelFrame(top, text="Selected species", padding=4)
-        pf.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        pf = ttk.LabelFrame(top, text="Selected species", padding=8)
+        pf.pack(side="left", fill="both", expand=True, padx=(8, 0))
         self.sv = {k: tk.StringVar() for k in ("name", "D", "N")}
+        for var in self.sv.values():
+            var.trace_add("write", lambda *a: self._schedule_check())
         ttk.Label(pf, text="Name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(pf, textvariable=self.sv["name"], width=18).grid(row=0, column=1, sticky="w")
-        ttk.Label(pf, text="Colours").grid(row=0, column=2, sticky="e", padx=(8, 2))
+        ttk.Entry(pf, textvariable=self.sv["name"], width=22).grid(row=0, column=1, columnspan=2, sticky="w", pady=2)
+        tip(ttk.Label(pf, text="Colours"), "colors").grid(row=0, column=3, sticky="e", padx=(10, 4))
         self.color_cb = ttk.Combobox(pf, values=["1", "2", "3", "4"], state="readonly", width=4)
-        self.color_cb.grid(row=0, column=3, sticky="w")
-        self.color_cb.bind("<<ComboboxSelected>>", lambda e: self._update_color_rows())
-        ttk.Label(pf, text="D [um^2/s]").grid(row=1, column=0, sticky="w")
-        ttk.Entry(pf, textvariable=self.sv["D"], width=10).grid(row=1, column=1, sticky="w")
-        ttk.Label(pf, text="Particles N").grid(row=1, column=2, sticky="e", padx=(8, 2))
-        ent = ttk.Entry(pf, textvariable=self.sv["N"], width=8)
-        ent.grid(row=1, column=3, sticky="w")
-        self.conc = ttk.Label(pf, text="")
-        self.conc.grid(row=1, column=4, sticky="w", padx=6)
+        self.color_cb.grid(row=0, column=4, sticky="w")
+        self.color_cb.bind("<<ComboboxSelected>>", lambda e: (self._update_color_rows(), self._schedule_check()))
+        tip(ttk.Label(pf, text="D"), "D").grid(row=1, column=0, sticky="w")
+        tip(ttk.Entry(pf, textvariable=self.sv["D"], width=9), "D").grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(pf, text="um^2/s", style="Hint.TLabel").grid(row=1, column=2, sticky="w")
+        tip(ttk.Label(pf, text="Molecules N"), "N").grid(row=1, column=3, sticky="e", padx=(10, 4))
+        tip(ttk.Entry(pf, textvariable=self.sv["N"], width=9), "N").grid(row=1, column=4, sticky="w")
+        self.conc = ttk.Label(pf, text="", style="Hint.TLabel")
+        self.conc.grid(row=1, column=5, sticky="w", padx=6)
         self.sv["N"].trace_add("write", lambda *a: self._update_conc())
-        for k in ("bs0", "bs1", "bs2"):
-            self.v[k].trace_add("write", lambda *a: self._update_conc())
-        ttk.Label(pf, text="FRET").grid(row=2, column=0, sticky="w")
+        tip(ttk.Label(pf, text="FRET"), "fret").grid(row=2, column=0, sticky="w")
         self.fret_cb = ttk.Combobox(pf, values=FRET_TYPES, state="readonly", width=14)
-        self.fret_cb.grid(row=2, column=1, sticky="w")
-        self.fret_cb.bind("<<ComboboxSelected>>", lambda e: self._update_dyn_table())
-        ttk.Label(pf, text="Map type").grid(row=2, column=2, sticky="e", padx=(8, 2))
-        self.barrier_cb = ttk.Combobox(pf, values=BARRIERS, state="readonly", width=34)
-        self.barrier_cb.grid(row=2, column=3, columnspan=2, sticky="w")
+        self.fret_cb.grid(row=2, column=1, columnspan=2, sticky="w", pady=2)
+        self.fret_cb.bind("<<ComboboxSelected>>", lambda e: (self._update_dyn_table(), self._schedule_check()))
+        tip(ttk.Label(pf, text="Map type"), "map").grid(row=2, column=3, sticky="e", padx=(10, 4))
+        self.barrier_cb = ttk.Combobox(pf, values=BARRIERS, state="readonly", width=30)
+        self.barrier_cb.grid(row=2, column=4, columnspan=2, sticky="w")
+        self.barrier_cb.bind("<<ComboboxSelected>>", lambda e: self._schedule_check())
         self.use_lt = tk.BooleanVar()
-        ttk.Checkbutton(pf, text="Use lifetime", variable=self.use_lt).grid(row=3, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(pf, text="Simulate fluorescence lifetime", variable=self.use_lt).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
         nb = ttk.Notebook(parent)
-        nb.pack(fill="both", expand=True, pady=(6, 0))
+        nb.pack(fill="both", expand=True, pady=(8, 0))
+        self.notebook = nb
 
-        # per colour table
-        cf = ttk.Frame(nb, padding=4)
-        nb.add(cf, text="Colours / focus / lifetime")
+        cf = ttk.Frame(nb, padding=8)
+        nb.add(cf, text="Colours & focus")
         for j, (name, unit) in enumerate(COLOR_COLUMNS):
-            ttk.Label(cf, text=f"{name}\n[{unit}]" if unit else f"{name}\n", justify="center").grid(row=0, column=j + 1, padx=1)
+            lab = ttk.Label(cf, text=f"{name}\n[{unit}]" if unit else f"{name}\n", justify="center")
+            lab.grid(row=0, column=j + 1, padx=1)
+            if j == 0:
+                tip(lab, "brightness")
         self.cvars = [[tk.StringVar() for _ in COLOR_COLUMNS] for _ in range(4)]
         self.cent = []
         for i in range(4):
-            ttk.Label(cf, text=f"Colour {i + 1}").grid(row=i + 1, column=0, sticky="w")
+            dot = tk.Label(cf, text="●", foreground=PALETTE[i])
+            dot.grid(row=i + 1, column=0, sticky="w")
+            ttk.Label(cf, text=f" Colour {i + 1}").grid(row=i + 1, column=0, sticky="w", padx=(14, 4))
             row = []
             for j in range(len(COLOR_COLUMNS)):
-                e = ttk.Entry(cf, textvariable=self.cvars[i][j], width=8)
+                self.cvars[i][j].trace_add("write", lambda *a: self._schedule_check())
+                e = ttk.Entry(cf, textvariable=self.cvars[i][j], width=6)
                 e.grid(row=i + 1, column=j + 1, padx=1, pady=1)
+                if j == 0:
+                    tip(e, "brightness")
                 row.append(e)
             self.cent.append(row)
-        ttk.Label(cf, text="Brightness sets the diagonal of ExP like in Sim.m (peak count rate of one molecule).\n"
-                           "r0, rho, r_inf are only used with anisotropy switched on.",
-                  foreground="#52514e").grid(row=6, column=0, columnspan=11, sticky="w", pady=(6, 0))
+        ttk.Label(cf, text="Brightness = count rate of one molecule in the focus centre (0 = no dye of this colour).\n"
+                           "wr / wz = 1/e² radii of the focus.  r0, rho, r_inf are used only with anisotropy on.",
+                  style="Hint.TLabel").grid(row=6, column=0, columnspan=11, sticky="w", pady=(8, 0))
 
-        # matrices
-        mf = ttk.Frame(nb, padding=4)
-        nb.add(mf, text="Excitation / crosstalk / detection / bleaching")
+        mf = ttk.Frame(nb, padding=8)
+        nb.add(mf, text="Excitation / crosstalk / detection")
         self.mat_cb = ttk.Combobox(mf, values=list(MATRICES), state="readonly", width=44)
         self.mat_cb.current(0)
-        self.mat_cb.grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 4))
+        self.mat_cb.grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 6))
         self.mat_cb.bind("<<ComboboxSelected>>", self._on_matrix_change)
         self.mvars = [[tk.StringVar() for _ in range(4)] for _ in range(4)]
         self.mrow_lbl = [ttk.Label(mf, text="") for _ in range(4)]
@@ -255,51 +542,148 @@ class SimGUI:
         for j in range(4):
             self.mcol_lbl[j].grid(row=1, column=j + 1)
         for i in range(4):
-            self.mrow_lbl[i].grid(row=i + 2, column=0, sticky="w", padx=(0, 4))
+            self.mrow_lbl[i].grid(row=i + 2, column=0, sticky="w", padx=(0, 6))
             for j in range(4):
-                ttk.Entry(mf, textvariable=self.mvars[i][j], width=10).grid(row=i + 2, column=j + 1, padx=1, pady=1)
-        self.mat_note = ttk.Label(mf, text="", foreground="#52514e")
-        self.mat_note.grid(row=6, column=0, columnspan=5, sticky="w", pady=(6, 0))
+                ttk.Entry(mf, textvariable=self.mvars[i][j], width=8).grid(row=i + 2, column=j + 1, padx=1, pady=1)
+        self.mat_note = ttk.Label(mf, text="", style="Hint.TLabel", wraplength=560)
+        self.mat_note.grid(row=6, column=0, columnspan=5, sticky="w", pady=(8, 0))
 
-        # FRET
-        ff = ttk.Frame(nb, padding=4)
-        nb.add(ff, text="FRET / dynamics")
+        ff = ttk.Frame(nb, padding=8)
+        nb.add(ff, text="FRET & dynamics")
         self.fvars = {}
         pairs = [(1, 0), (2, 0), (3, 0), (2, 1), (3, 1), (3, 2)]
         for c, (title, key) in enumerate((("Foerster radius R0", "R0"), ("Distance R", "R"),
                                           ("Distance width sigma", "distance_width"))):
-            ttk.Label(ff, text=title, style="Head.TLabel").grid(row=0, column=2 * c, columnspan=2, sticky="w", padx=(0 if c == 0 else 12, 0))
+            pad = 0 if c == 0 else 14
+            ttk.Label(ff, text=title, style="Head.TLabel").grid(row=0, column=2 * c, columnspan=2, sticky="w", padx=(pad, 0))
             for r, (a, d) in enumerate(pairs):
-                ttk.Label(ff, text=f"{d + 1} -> {a + 1}").grid(row=r + 1, column=2 * c, sticky="e", padx=(0 if c == 0 else 12, 2))
+                ttk.Label(ff, text=f"{d + 1} → {a + 1}").grid(row=r + 1, column=2 * c, sticky="e", padx=(pad, 4))
                 var = tk.StringVar()
-                ttk.Entry(ff, textvariable=var, width=8).grid(row=r + 1, column=2 * c + 1, pady=1)
+                ttk.Entry(ff, textvariable=var, width=7).grid(row=r + 1, column=2 * c + 1, pady=1)
                 self.fvars[(key, a, d)] = var
-        ttk.Label(ff, text="donor -> acceptor (colour numbers); same unit for R0, R, sigma and linker width",
-                  foreground="#52514e").grid(row=8, column=0, columnspan=6, sticky="w", pady=(4, 0))
-        self.dyn_frame = ttk.LabelFrame(ff, text="Dynamic interconversion rates [1/ms], from (row) -> to (column)", padding=4)
+        ttk.Label(ff, text="donor → acceptor (colour numbers); R0, R, sigma and linker width share one unit (e.g. Å)",
+                  style="Hint.TLabel").grid(row=8, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        self.dyn_frame = ttk.LabelFrame(ff, text="Dynamic interconversion rates [1/ms], from (row) → to (column)", padding=6)
         self.dyn_frame.grid(row=9, column=0, columnspan=6, sticky="we", pady=(8, 0))
         self.dyn_vars = []
         self.dyn_values = np.zeros((1, 1))
 
-        af = ttk.Frame(nb, padding=4)
-        nb.add(af, text="Advanced / maps / performance")
+        af = ttk.Frame(nb, padding=8)
+        nb.add(af, text="Advanced")
         self._build_advanced(af)
 
+    def _build_advanced(self, parent):
+        a = ttk.LabelFrame(parent, text="Lifetime & FRET extras (switch to the DifSim_ani kernel)", padding=8)
+        a.pack(fill="x", anchor="w")
+        self.use_irf = tk.BooleanVar(); self.use_aniso = tk.BooleanVar()
+        self.use_fw = tk.BooleanVar(); self.use_lw = tk.BooleanVar()
+        for var in (self.use_irf, self.use_aniso, self.use_fw, self.use_lw):
+            var.trace_add("write", lambda *a: self._schedule_check())
+        ttk.Checkbutton(a, text="IRF, width [ps]", variable=self.use_irf).grid(row=0, column=0, sticky="w")
+        ttk.Entry(a, textvariable=self._var("irf"), width=8).grid(row=0, column=1, pady=2)
+        ttk.Checkbutton(a, text="Anisotropy (channels 1-4 parallel, 5-8 perpendicular)", variable=self.use_aniso).grid(
+            row=1, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(a, text="Distance width, redraw every [ms]", variable=self.use_fw).grid(row=2, column=0, sticky="w")
+        ttk.Entry(a, textvariable=self._var("hetupd"), width=8).grid(row=2, column=1, pady=2)
+        ttk.Checkbutton(a, text="Linker width", variable=self.use_lw).grid(row=3, column=0, sticky="w")
+        ttk.Entry(a, textvariable=self._var("linker"), width=8).grid(row=3, column=1, pady=2)
+
+        m = ttk.LabelFrame(parent, text="Barrier / quenching map (1 pixel = 1 nm, map[x, y])", padding=8)
+        m.pack(fill="x", pady=(8, 0), anchor="w")
+        self.map_label = ttk.Label(m, text="no map loaded", width=40)
+        self.map_label.grid(row=0, column=0, sticky="w")
+        ttk.Button(m, text="Load map...", command=self._load_map).grid(row=0, column=1, padx=4)
+        ttk.Button(m, text="Clear", command=self._clear_map).grid(row=0, column=2)
+
+        p = ttk.LabelFrame(parent, text="Performance", padding=8)
+        p.pack(fill="x", pady=(8, 0), anchor="w")
+        self.ff = tk.BooleanVar(value=True)
+        tip(ttk.Checkbutton(p, text="Fast-forward far from the focus", variable=self.ff), "ff").grid(row=0, column=0, sticky="w")
+        tip(ttk.Label(p, text="CPU cores"), "threads").grid(row=0, column=1, padx=(14, 4))
+        tip(ttk.Entry(p, textvariable=self._var("threads", str(os.cpu_count() or 1)), width=5), "threads").grid(row=0, column=2)
+        self.reset_bleach = tk.BooleanVar()
+        ttk.Checkbutton(p, text="Unbleach dyes at every frame (exactly like Sim.m)", variable=self.reset_bleach).grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
+    def _build_output(self, parent):
+        ttk.Label(parent, text="3  Output", style="Head.TLabel").pack(anchor="w", pady=(10, 4))
+        o = ttk.LabelFrame(parent, text="Files", padding=8)
+        o.pack(fill="x")
+        tip(ttk.Label(o, text="Folder"), "folder").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        fe = ttk.Entry(o, textvariable=self._var("folder", os.path.expanduser("~")), width=30)
+        fe.grid(row=0, column=1, columnspan=2, sticky="we", pady=2)
+        tip(fe, "folder")
+        ttk.Button(o, text="Browse...", command=self._choose_folder).grid(row=0, column=3, padx=(4, 0))
+        tip(ttk.Label(o, text="File name"), "name").grid(row=1, column=0, sticky="w")
+        ttk.Entry(o, textvariable=self._var("name"), width=18).grid(row=1, column=1, sticky="w", pady=2)
+        tip(ttk.Label(o, text="Number of files"), "nfiles").grid(row=2, column=0, sticky="w")
+        ttk.Entry(o, textvariable=self._var("nfiles", "1"), width=5).grid(row=2, column=1, sticky="w", pady=2)
+        ttk.Label(o, text="Format").grid(row=3, column=0, sticky="w")
+        self.fmt = ttk.Combobox(o, values=[".sim (PAM)", ".npz (numpy)", "both"], state="readonly", width=12)
+        self.fmt.current(0)
+        self.fmt.grid(row=3, column=1, sticky="w", pady=2)
+        self.save_setup = tk.BooleanVar(value=True)
+        ttk.Checkbutton(o, text="Save the setup next to the data", variable=self.save_setup).grid(
+            row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        o.columnconfigure(2, weight=1)
+
     def _build_run(self, parent):
-        bar = ttk.Frame(parent)
-        bar.pack(fill="x")
-        self.start_btn = ttk.Button(bar, text="Start", width=10, command=self._start_stop)
-        self.start_btn.pack(side="left")
-        self.plot_btn = ttk.Button(bar, text="Plot last result", command=self._plot, state="disabled")
-        self.plot_btn.pack(side="left", padx=6)
-        self.progress = ttk.Progressbar(bar, mode="determinate", maximum=1.0)
-        self.progress.pack(side="left", fill="x", expand=True, padx=6)
-        self.status = ttk.Label(bar, text="ready", width=40)
-        self.status.pack(side="left")
-        self.log = tk.Text(parent, height=7, wrap="word", state="disabled")
-        self.log.pack(fill="both", expand=True, pady=(4, 0))
+        strip = ttk.Frame(parent)
+        strip.pack(fill="both", expand=True, pady=(10, 0))
+        nb = ttk.Notebook(strip)
+        nb.pack(side="left", fill="both", expand=True)
+        self.info_nb = nb
+        cf = ttk.Frame(nb, padding=6)
+        nb.add(cf, text="Check")
+        lf = ttk.Frame(nb, padding=6)
+        nb.add(lf, text="Log")
+        font = ("Segoe UI", 9) if sys.platform == "win32" else ("TkDefaultFont", 9)
+        self.check_text = tk.Text(cf, height=8, width=60, wrap="word", borderwidth=0, highlightthickness=0,
+                                  font=font, background=self._bg(), cursor="arrow")
+        self.check_text.pack(fill="both", expand=True)
+        for lvl, col in LEVEL_COLORS.items():
+            self.check_text.tag_configure(lvl, foreground=col)
+        self.check_text.tag_configure("body", foreground="#222222", spacing3=4)
+        self.check_text.configure(state="disabled")
+        self.log = tk.Text(lf, height=8, width=60, wrap="word", state="disabled", borderwidth=0, highlightthickness=0,
+                           font=("Consolas", 8) if sys.platform == "win32" else ("TkFixedFont", 8),
+                           background=self._bg())
+        self.log.pack(fill="both", expand=True)
+
+        run = ttk.Frame(strip, padding=(12, 4, 0, 0))
+        run.pack(side="left", fill="y")
+        self.start_btn = ttk.Button(run, text="\u25b6  Start simulation", style="Big.Accent.TButton",
+                                    command=self._start_stop, width=20)
+        self.start_btn.pack(fill="x")
+        self.progress = ttk.Progressbar(run, mode="determinate", maximum=1.0, length=230)
+        self.progress.pack(fill="x", pady=(10, 2))
+        self.status = ttk.Label(run, text="Ready.", style="Hint.TLabel", wraplength=240)
+        self.status.pack(anchor="w")
+        b2 = ttk.Frame(run)
+        b2.pack(fill="x", side="bottom")
+        self.plot_btn = ttk.Button(b2, text="Plot result", command=self._plot, state="disabled")
+        self.plot_btn.pack(side="left", expand=True, fill="x")
+        self.open_btn = ttk.Button(b2, text="Open folder", command=self._open_folder)
+        self.open_btn.pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+    def _bg(self):
+        try:
+            return ttk.Style(self.root).lookup("TFrame", "background") or "#fafafa"
+        except Exception:  # noqa: BLE001
+            return "#fafafa"
 
     # ------------------------------------------------------------- model <-> widgets
+    def _load_all(self):
+        self._loading = True
+        try:
+            self._load_general()
+            self.sel = min(self.sel, len(self.settings.species) - 1)
+            self._refresh_species_list()
+            self._load_species()
+        finally:
+            self._loading = False
+        self._schedule_check()
+
     def _load_general(self):
         s = self.settings
         for i in range(3):
@@ -321,14 +705,14 @@ class SimGUI:
         self.use_lw.set(bool(s.use_linker_width)); self.v["linker"].set(_fmt(s.linker_width))
         self.ff.set(bool(s.fast_forward)); self.reset_bleach.set(bool(s.reset_bleaching_each_frame))
         self.v["name"].set(s.name)
-        if s.dynamic_rates is not None:
-            self.dyn_values = np.array(s.dynamic_rates, float)
+        self.dyn_values = np.array(s.dynamic_rates, float) if s.dynamic_rates is not None else np.zeros((1, 1))
         self._show_map()
+        self._update_scan_state()
 
     def _store_general(self):
         s = self.settings
         s.box_size = np.array([_f(self.v[f"bs{i}"].get(), "box size") for i in range(3)])
-        s.freq = _f(self.v["freq"].get(), "frequency")
+        s.freq = _f(self.v["freq"].get(), "sampling frequency")
         s.sim_time = _f(self.v["time"].get(), "simulation time")
         s.frames = max(1, int(_f(self.v["frames"].get(), "frames")))
         seed = self.v["seed"].get().strip()
@@ -337,20 +721,20 @@ class SimGUI:
         s.scan_type = self.scan_cb.current() + 1
         s.pixels = np.array([_f(self.v[f"px{i}"].get(), "pixels") for i in range(2)])
         s.pixel_size = np.array([_f(self.v[f"sz{i}"].get(), "pixel size") for i in range(2)])
-        s.times = np.array([_f(self.v["t0"].get(), "pixel time"), _f(self.v["t1"].get(), "line time"),
-                            s.times[2]])
+        s.times = np.array([_f(self.v["t0"].get(), "pixel time"), _f(self.v["t1"].get(), "line time"), s.times[2]])
         s.use_noise = self.use_noise.get()
-        s.noise = np.array([_f(self.v[f"noise{i}"].get(), "noise") for i in range(4)])
+        s.noise = np.array([_f(self.v[f"noise{i}"].get(), "background") for i in range(4)])
         s.use_irf = self.use_irf.get(); s.irf_width = _f(self.v["irf"].get(), "IRF width")
         s.use_aniso = self.use_aniso.get()
         s.use_fret_width = self.use_fw.get(); s.heterogeneity_update = _f(self.v["hetupd"].get(), "update time")
         s.use_linker_width = self.use_lw.get(); s.linker_width = _f(self.v["linker"].get(), "linker width")
         s.fast_forward = self.ff.get(); s.reset_bleaching_each_frame = self.reset_bleach.get()
-        s.n_threads = max(1, int(_f(self.v["threads"].get(), "threads")))
-        s.name = self.v["name"].get().strip() or "Simulation"
+        s.n_threads = max(1, int(_f(self.v["threads"].get(), "CPU cores")))
+        s.name = self.v["name"].get().strip() or "simulation"
         self._store_dyn()
         n = len(s.species)
-        s.dynamic_rates = self.dyn_values[:n, :n].copy() if np.any(self.dyn_values[:n, :n]) else None
+        dv = self.dyn_values[:n, :n]
+        s.dynamic_rates = dv.copy() if dv.shape == (n, n) and np.any(dv) else None
 
     def _load_species(self):
         sp = self.settings.species[self.sel]
@@ -389,6 +773,10 @@ class SimGUI:
         for (key, a, d), var in self.fvars.items():
             getattr(sp, key)[a, d] = _f(var.get(), key)
         self._store_matrix()
+        if self.sp_list.size() > self.sel and self.sp_list.get(self.sel) != sp.name:
+            self.sp_list.delete(self.sel)
+            self.sp_list.insert(self.sel, sp.name)
+            self.sp_list.selection_set(self.sel)
 
     def _load_matrix(self):
         attr, rlab, clab = MATRICES[self.matrix_key]
@@ -398,17 +786,17 @@ class SimGUI:
             self.mcol_lbl[i].configure(text=f"{clab} {i + 1}")
             for j in range(4):
                 self.mvars[i][j].set(_fmt(m[i, j]))
-        notes = {"ExP": "Diagonal is set from the Brightness column; off-diagonal = direct excitation of a dye by another laser.",
-                 "Cross": "Relative crosstalk of a dye's photons into other channels (diagonal is always 1).",
-                 "DetP": "Probability that an emitted photon of a dye is detected in a channel (0..1).",
+        notes = {"ExP": "The diagonal is set by the Brightness column; off-diagonal entries are direct excitation "
+                        "of a dye by another laser (relative to its own laser).",
+                 "Cross": "Relative crosstalk of a dye's photons into other channels (the diagonal is always 1).",
+                 "DetP": "Probability (0..1) that an emitted photon of a dye is detected in a channel.",
                  "BlP": "Probability per emitted photon that the dye bleaches (it recovers when leaving the box)."}
         self.mat_note.configure(text=notes[attr])
 
     def _store_matrix(self):
         attr, _, _ = MATRICES[self.matrix_key]
         sp = self.settings.species[self.sel]
-        m = np.array([[_f(self.mvars[i][j].get(), attr) for j in range(4)] for i in range(4)])
-        setattr(sp, attr, m)
+        setattr(sp, attr, np.array([[_f(self.mvars[i][j].get(), attr) for j in range(4)] for i in range(4)]))
 
     def _on_matrix_change(self, _event=None):
         try:
@@ -426,17 +814,22 @@ class SimGUI:
             for e in self.cent[i]:
                 e.configure(state="normal" if i < n else "disabled")
 
+    def _update_scan_state(self):
+        point = self.scan_cb.current() in (0, 3)
+        if point:
+            self.scan_rows.grid_remove()
+        else:
+            self.scan_rows.grid()
+
     def _update_conc(self):
         try:
             n = float(self.sv["N"].get())
             bs = [float(self.v[f"bs{i}"].get()) for i in range(3)]
-            vol = np.prod([b for b in bs if b > 0])
             if bs[2] > 0:
-                c = n / vol / 1e-24 / 6.022e23 / 1e-9
-                self.conc.configure(text=f"= {c:.3g} nM")
+                self.conc.configure(text=f"= {n / np.prod(bs) / 1e-24 / 6.022e23 / 1e-9:.3g} nM")
             else:
-                self.conc.configure(text=f"= {n / vol * 1e6:.3g} /um^2")
-        except (ValueError, ZeroDivisionError):
+                self.conc.configure(text=f"= {n / (bs[0] * bs[1]) * 1e6:.3g} per um^2")
+        except (ValueError, ZeroDivisionError, KeyError):
             self.conc.configure(text="")
 
     def _store_dyn(self):
@@ -458,23 +851,47 @@ class SimGUI:
         self.dyn_values[:k, :k] = old[:k, :k]
         for w in self.dyn_frame.winfo_children():
             w.destroy()
-        names = [s.name for s in self.settings.species]
         dynamic = any(s.fret == 3 for s in self.settings.species) or self.fret_cb.current() == 2
         if not dynamic or n < 2:
-            ttk.Label(self.dyn_frame, text="Set FRET to 'Dynamic FRET' and add >= 2 species "
-                                           "(each species is one state).", foreground="#52514e").grid(row=0, column=0)
+            ttk.Label(self.dyn_frame, text="Set FRET to 'Dynamic FRET' and add >= 2 species (each species is one state).",
+                      style="Hint.TLabel").grid(row=0, column=0)
             self.dyn_vars = []
             return
+        names = [s.name for s in self.settings.species]
         self.dyn_vars = [[tk.StringVar(value=_fmt(self.dyn_values[i, j])) for j in range(n)] for i in range(n)]
         for j in range(n):
-            ttk.Label(self.dyn_frame, text=names[j][:10]).grid(row=0, column=j + 1)
+            ttk.Label(self.dyn_frame, text=names[j][:12]).grid(row=0, column=j + 1)
         for i in range(n):
-            ttk.Label(self.dyn_frame, text=names[i][:10]).grid(row=i + 1, column=0, sticky="w")
+            ttk.Label(self.dyn_frame, text=names[i][:12]).grid(row=i + 1, column=0, sticky="w")
             for j in range(n):
-                e = ttk.Entry(self.dyn_frame, textvariable=self.dyn_vars[i][j], width=8)
+                e = ttk.Entry(self.dyn_frame, textvariable=self.dyn_vars[i][j], width=7)
                 e.grid(row=i + 1, column=j + 1, padx=1, pady=1)
                 if i == j:
                     e.configure(state="disabled")
+
+    # ------------------------------------------------------------- checks
+    def _schedule_check(self):
+        if self._loading or not hasattr(self, "check_text"):
+            return
+        if self._check_job:
+            self.root.after_cancel(self._check_job)
+        self._check_job = self.root.after(350, self._run_check)
+
+    def _run_check(self):
+        self._check_job = None
+        try:
+            self._store_species()
+            self._store_general()
+            msgs = check_settings(self.settings, self.v["folder"].get().strip())
+        except ValueError as err:
+            msgs = [("error", str(err))]
+        t = self.check_text
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        for lvl, text in msgs:
+            t.insert("end", LEVEL_ICONS[lvl] + "  ", lvl)
+            t.insert("end", text + "\n", ("body",))
+        t.configure(state="disabled")
 
     # ------------------------------------------------------------- species list
     def _refresh_species_list(self):
@@ -501,25 +918,28 @@ class SimGUI:
             return
         self.sel = cur[0]
         self._refresh_species_list()
-        self._load_species()
+        self._loading = True
+        try:
+            self._load_species()
+        finally:
+            self._loading = False
 
-    def _add_species(self):
+    def _add_species(self, copy_current=False):
         if not self._safe_store():
             return
-        self.settings.species.append(Species(name=f"Species {len(self.settings.species) + 1}"))
-        self.sel = len(self.settings.species) - 1
-        self._refresh_species_list()
-        self._load_species()
-
-    def _copy_species(self):
-        if not self._safe_store():
-            return
-        sp = copy.deepcopy(self.settings.species[self.sel])
+        if copy_current:
+            sp = copy.deepcopy(self.settings.species[self.sel])
+        else:
+            sp = Species(color=self.settings.species[self.sel].color, brightness=[100.0] * 4, D=50, N=100)
         sp.name = f"Species {len(self.settings.species) + 1}"
         self.settings.species.append(sp)
         self.sel = len(self.settings.species) - 1
         self._refresh_species_list()
         self._load_species()
+        self._schedule_check()
+
+    def _copy_species(self):
+        self._add_species(copy_current=True)
 
     def _delete_species(self):
         if len(self.settings.species) <= 1:
@@ -528,12 +948,40 @@ class SimGUI:
         self.sel = max(0, self.sel - 1)
         self._refresh_species_list()
         self._load_species()
+        self._schedule_check()
 
-    # ------------------------------------------------------------- files
+    # ------------------------------------------------------------- presets / files / state
+    def _apply_preset(self):
+        name = self.preset_cb.get()
+        p = presets().get(name)
+        if p is None:
+            return
+        if not messagebox.askyesno(APP, f"Replace the current setup with the preset '{name}'?"):
+            return
+        p.seed = None
+        self.settings = p
+        self.sel = 0
+        self._load_all()
+        self._log(f"preset '{name}' applied")
+
     def _choose_folder(self):
-        d = filedialog.askdirectory(initialdir=self.v["folder"].get() or os.getcwd())
+        d = filedialog.askdirectory(initialdir=self.v["folder"].get() or os.path.expanduser("~"))
         if d:
             self.v["folder"].set(d)
+
+    def _open_folder(self):
+        folder = self.v["folder"].get().strip()
+        if not os.path.isdir(folder):
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(folder)  # noqa: S606
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except Exception as err:  # noqa: BLE001
+            messagebox.showerror(APP, str(err))
 
     def _load_map(self):
         path = filedialog.askopenfilename(filetypes=[("Maps", "*.npy *.mat *.txt *.csv *.tif *.tiff"), ("All", "*.*")])
@@ -545,21 +993,22 @@ class SimGUI:
             messagebox.showerror("Could not load map", str(err))
             return
         self._show_map(os.path.basename(path))
+        self._schedule_check()
 
     def _clear_map(self):
         self.settings.maps = None
         self._show_map()
+        self._schedule_check()
 
     def _show_map(self, name=None):
         m = self.settings.maps
         if m is None:
             self.map_label.configure(text="no map loaded")
         else:
-            shape = " x ".join(str(x) for x in np.shape(m))
-            self.map_label.configure(text=f"{name or 'map'}  ({shape})")
+            self.map_label.configure(text=f"{name or 'map'}  ({' x '.join(str(x) for x in np.shape(m))})")
 
     def _load_setup(self):
-        path = filedialog.askopenfilename(filetypes=[("Setup (pamsim or Sim.m JSON)", "*.json"), ("All", "*.*")])
+        path = filedialog.askopenfilename(filetypes=[("Setup (PAMsim or Sim.m JSON)", "*.json"), ("All", "*.*")])
         if not path:
             return
         try:
@@ -570,10 +1019,7 @@ class SimGUI:
         s.maps = self.settings.maps
         self.settings = s
         self.sel = 0
-        self.dyn_values = np.array(s.dynamic_rates, float) if s.dynamic_rates is not None else np.zeros((1, 1))
-        self._load_general()
-        self._refresh_species_list()
-        self._load_species()
+        self._load_all()
         self._log(f"loaded setup {path}")
 
     def _save_setup(self):
@@ -581,10 +1027,61 @@ class SimGUI:
             self._store_species(); self._store_general()
         except ValueError as err:
             messagebox.showerror("Invalid value", str(err)); return
-        path = filedialog.asksaveasfilename(defaultextension=".json", initialfile=self.settings.name + ".json")
+        path = filedialog.asksaveasfilename(defaultextension=".json", initialfile=self.settings.name + ".json",
+                                            filetypes=[("Setup", "*.json")])
         if path:
             save_setup(self.settings, path)
             self._log(f"saved setup {path}")
+
+    def _state_path(self):
+        return os.path.join(config_dir(), "last_session.json")
+
+    def _read_state(self):
+        try:
+            with open(self._state_path()) as f:
+                return json.load(f)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _apply_state(self, state):
+        try:
+            self.settings = SimSettings.from_dict(state["setup"])
+        except Exception:  # noqa: BLE001 - fall back to the default setup
+            pass
+        self.sel = 0
+        self._load_all()
+        for key in ("folder", "nfiles", "threads"):
+            if key in state:
+                self.v[key].set(str(state[key]))
+        if state.get("format") in (0, 1, 2):
+            self.fmt.current(state["format"])
+        self.save_setup.set(bool(state.get("save_json", True)))
+
+    def _on_close(self):
+        if self.worker is not None and self.worker.is_alive():
+            if not messagebox.askyesno(APP, "A simulation is running. Stop it and quit?"):
+                return
+            self.cancel.set()
+        try:
+            self._store_species(); self._store_general()
+            s = copy.copy(self.settings); s.maps = None
+            state = {"setup": s.to_dict(), "folder": self.v["folder"].get(), "nfiles": self.v["nfiles"].get(),
+                     "threads": self.v["threads"].get(), "format": self.fmt.current(),
+                     "save_json": self.save_setup.get()}
+            with open(self._state_path(), "w") as f:
+                json.dump(state, f)
+        except Exception:  # noqa: BLE001 - never block closing
+            pass
+        self.root.destroy()
+
+    def _help(self):
+        win = tk.Toplevel(self.root)
+        win.title(f"{APP} - help")
+        txt = tk.Text(win, width=82, height=26, wrap="word", padx=12, pady=10, borderwidth=0)
+        txt.insert("1.0", HELP_TEXT)
+        txt.configure(state="disabled")
+        txt.pack(fill="both", expand=True)
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=8)
 
     # ------------------------------------------------------------- run
     def _log(self, text):
@@ -596,7 +1093,7 @@ class SimGUI:
     def _start_stop(self):
         if self.worker is not None and self.worker.is_alive():
             self.cancel.set()
-            self.status.configure(text="stopping...")
+            self.status.configure(text="Stopping...")
             return
         try:
             self._store_species()
@@ -605,16 +1102,20 @@ class SimGUI:
         except ValueError as err:
             messagebox.showerror("Invalid value", str(err))
             return
-        folder = self.v["folder"].get().strip() or os.getcwd()
+        folder = self.v["folder"].get().strip() or os.path.expanduser("~")
         if not os.path.isdir(folder):
-            messagebox.showerror("Output folder", f"Folder does not exist:\n{folder}")
+            messagebox.showerror("Output folder", f"The folder does not exist:\n{folder}")
+            return
+        errors = [m for lvl, m in check_settings(self.settings, folder) if lvl == "error"]
+        if errors and not messagebox.askyesno(APP, "There are problems with the settings:\n\n- " +
+                                              "\n- ".join(errors) + "\n\nSimulate anyway?"):
             return
         self.cancel = threading.Event()
-        fmt = self.fmt.current()
-        job = (copy.deepcopy(self.settings), folder, nfiles, fmt, self.save_setup.get())
+        job = (copy.deepcopy(self.settings), folder, nfiles, self.fmt.current(), self.save_setup.get())
         self.worker = threading.Thread(target=self._run, args=job, daemon=True)
-        self.start_btn.configure(text="Stop")
+        self.start_btn.configure(text="■  Stop")
         self.progress["value"] = 0
+        self.last_files = []
         self.worker.start()
 
     def _run(self, settings, folder, nfiles, fmt, save_json):
@@ -624,12 +1125,12 @@ class SimGUI:
                 s = copy.deepcopy(settings)
                 if settings.seed is not None:
                     s.seed = settings.seed + k
-                q.put(("status", f"file {k + 1}/{nfiles}: preparing (first run compiles, ~15 s)"))
+                q.put(("status", f"File {k + 1}/{nfiles}: preparing (the very first run compiles for ~15 s)..."))
 
                 def progress(done, total, k=k):
-                    q.put(("progress", (k + done / total) / nfiles,
-                           f"file {k + 1}/{nfiles}: particle {done}/{total}"))
+                    q.put(("progress", (k + done / total) / nfiles, f"File {k + 1}/{nfiles}: molecule {done}/{total}"))
                 r = simulate(s, progress=progress, cancel=self.cancel)
+                q.put(("status", f"File {k + 1}/{nfiles}: saving..."))
                 base = os.path.join(folder, f"{s.name}_{k + 1}")
                 written = []
                 if fmt in (0, 2):
@@ -639,14 +1140,16 @@ class SimGUI:
                 if save_json:
                     save_setup(s, base + "_setup.json", seed=r.seed)
                     written.append(base + "_setup.json")
-                rates = ", ".join(f"{x:.2f}" for x in r.count_rates_khz())
-                q.put(("log", f"{os.path.basename(base)}: {r.elapsed:.1f} s, seed {r.seed}, "
-                              f"{sum(len(m) for m in r.macrotimes)} photons, count rates [kHz]: {rates}\n"
-                              f"   wrote: " + ", ".join(os.path.basename(w) for w in written)))
-                q.put(("result", r))
-            q.put(("done", "finished"))
+                rates = ", ".join(f"{x:.3g}" for x in r.count_rates_khz() if x > 0) or "0"
+                q.put(("log", f"{os.path.basename(base)}: {r.elapsed:.1f} s, "
+                              f"{sum(len(m) for m in r.macrotimes) / 1e6:.3g} M photons, rates [kHz] {rates}\n"
+                              f"  → " + ", ".join(os.path.basename(w) for w in written)))
+                q.put(("result", r, written))
+            q.put(("done", "Finished."))
         except SimulationCancelled:
-            q.put(("done", "stopped"))
+            q.put(("done", "Stopped."))
+        except MemoryError:
+            q.put(("error", "Out of memory: shorten the simulation time and use 'Number of files' instead."))
         except Exception:  # noqa: BLE001
             q.put(("error", traceback.format_exc()))
 
@@ -664,16 +1167,21 @@ class SimGUI:
                     self._log(msg[1])
                 elif kind == "result":
                     self.last_result = msg[1]
+                    self.last_files += msg[2]
                     self.plot_btn.configure(state="normal")
                 elif kind == "done":
-                    self.status.configure(text=msg[1])
-                    if msg[1] == "finished":
+                    self.info_nb.select(1)
+                    self.status.configure(text=msg[1] + (f"  Files are in {self.v['folder'].get()}"
+                                                         if msg[1] == "Finished." else ""))
+                    if msg[1] == "Finished.":
                         self.progress["value"] = 1.0
-                    self.start_btn.configure(text="Start")
+                    self.start_btn.configure(text="▶  Start simulation")
                 elif kind == "error":
                     self._log(msg[1])
-                    self.status.configure(text="error (see log)")
-                    self.start_btn.configure(text="Start")
+                    self.info_nb.select(1)
+                    self.status.configure(text="Error - see the log.")
+                    self.start_btn.configure(text="▶  Start simulation")
+                    messagebox.showerror(APP, msg[1].strip().splitlines()[-1])
         except queue.Empty:
             pass
         self.root.after(100, self._poll)
@@ -690,31 +1198,32 @@ class SimGUI:
             return
         from .correlation import correlate_blocks
         win = tk.Toplevel(self.root)
-        win.title("Last simulation")
-        fig = Figure(figsize=(9, 3.6), dpi=100, facecolor="#fcfcfb")
+        win.title(f"{APP} - last simulation")
+        fig = Figure(figsize=(10, 3.8), dpi=100, facecolor="#fcfcfb")
         ax1 = fig.add_subplot(1, 2, 1); ax2 = fig.add_subplot(1, 2, 2)
         total = r.header["Frames"] * r.header["FrameTime"]
         chans = [c for c in range(min(r.n_channels, 4)) if r.macrotimes[c].size]
-        binw = max(1, int(r.freq_hz * 1e-3))  # 1 ms bins
+        binw = max(1, int(r.freq_hz * 1e-3))
         nb = int(total // binw) + 1
         for c in chans:
             tr = np.bincount((r.macrotimes[c] // binw).astype(np.int64), minlength=nb)[:nb]
-            t = np.arange(nb) * binw / r.freq_hz
-            ax1.plot(t, tr / (binw / r.freq_hz) / 1e3, lw=0.7, alpha=0.85, color=PALETTE[c], label=f"channel {c + 1}")
+            ax1.plot(np.arange(nb) * binw / r.freq_hz, tr / (binw / r.freq_hz) / 1e3, lw=0.7, alpha=0.85,
+                     color=PALETTE[c], label=f"channel {c + 1}")
         ax1.set_xlabel("time [s]"); ax1.set_ylabel("count rate [kHz] (1 ms bins)")
         ax1.set_title("Intensity trace", fontsize=10)
-        curves = [(c, c, f"auto {c + 1}") for c in chans[:2]]
-        if len(chans) >= 2:
-            curves.append((chans[0], chans[1], f"cross {chans[0] + 1}x{chans[1] + 1}"))
-        for k, (a, b, lab) in enumerate(curves):
+        curves = [(c, c, f"auto {c + 1}", PALETTE[c]) for c in chans[:3]]
+        extra = ["#e87ba4", "#6250d6", "#e34948"]
+        pairs = [(a, b) for i, a in enumerate(chans[:3]) for b in chans[i + 1:3]]
+        curves += [(a, b, f"cross {a + 1}×{b + 1}", extra[k]) for k, (a, b) in enumerate(pairs)]
+        for a, b, lab, col in curves:
             try:
-                lags, g, sem, _ = correlate_blocks(r.macrotimes[a], r.macrotimes[b], total, n_blocks=10)
+                lags, g, _, _ = correlate_blocks(r.macrotimes[a], r.macrotimes[b], total, n_blocks=10)
             except Exception:  # noqa: BLE001 - e.g. too few photons
                 continue
             ok = lags > 0
-            ax2.plot(lags[ok] / r.freq_hz, g[ok], lw=2, color=PALETTE[k], label=lab)
-        ax2.set_xscale("log"); ax2.set_xlabel("lag time [s]"); ax2.set_ylabel("G(tau)")
-        ax2.set_title("Correlation (10 sections)", fontsize=10)
+            ax2.plot(lags[ok] / r.freq_hz, g[ok], lw=1.6, color=col, label=lab)
+        ax2.set_xscale("log"); ax2.set_xlabel("lag time [s]"); ax2.set_ylabel("G(τ)")
+        ax2.set_title("Correlation functions (10 sections)", fontsize=10)
         for ax in (ax1, ax2):
             ax.set_facecolor("#fcfcfb")
             ax.grid(True, color="#e6e5e0", lw=0.6)
@@ -772,10 +1281,15 @@ def main():
         try:
             import ctypes
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("pamsim.gui")  # own taskbar icon
         except Exception:  # noqa: BLE001
             pass
     root = tk.Tk()
-    SimGUI(root)
+    try:
+        SimGUI(root)
+    except Exception:  # noqa: BLE001 - started without console: show the error
+        messagebox.showerror(APP, "PAMsim could not start:\n\n" + traceback.format_exc())
+        raise
     root.mainloop()
 
 

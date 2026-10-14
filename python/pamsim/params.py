@@ -191,7 +191,12 @@ class SimSettings:
         """Load either a file written by :meth:`save_json` or the JSON that
         Sim.m writes with its "save" button (``save_json`` in Sim.m)."""
         with open(path) as f:
-            data = json.load(f)
+            return cls.from_dict(json.load(f))
+
+    @classmethod
+    def from_dict(cls, data):
+        """Settings from a dict as written by :meth:`to_dict`, or a Sim.m setup dict."""
+        data = dict(data)
         if "BS" in data or "Freq" in data:
             return cls.from_pam_dict(data)
         species = [Species(**{k: v for k, v in s.items() if k in _field_names(Species)})

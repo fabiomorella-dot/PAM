@@ -13,6 +13,7 @@ dependencies = ["numpy>=1.22", "numba>=0.57", "scipy>=1.8"]
 
 [project.optional-dependencies]
 plot = ["matplotlib"]
+gui = ["matplotlib", "sv-ttk", "pillow"]
 test = ["pytest"]
 
 [project.gui-scripts]
@@ -20,6 +21,9 @@ pamsim-gui = "pamsim.gui:main"
 
 [tool.setuptools]
 packages = ["pamsim"]
+
+[tool.setuptools.package-data]
+pamsim = ["assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

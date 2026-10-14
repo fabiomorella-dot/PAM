@@ -1,4 +1,4 @@
-"""Start the pamsim GUI:  python run_gui.py   (works without installing the package)."""
+"""Start the PAMsim GUI from a terminal:  python run_gui.py"""
 import os
 import sys
 

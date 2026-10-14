@@ -316,3 +316,23 @@ def test_large_sim_is_split(tmp_path):
         assert offset == r.header["Frames"] * r.header["FrameTime"]
         for c in range(4):
             np.testing.assert_array_equal(np.concatenate(got[c]), r.macrotimes[c])
+
+
+def test_gui_presets_and_checks():
+    pytest.importorskip("tkinter")
+    from pamsim.gui import check_settings, presets
+    for name, s in presets().items():
+        s.sim_time = 0.05
+        msgs = check_settings(s)
+        assert not [m for lvl, m in msgs if lvl == "error"], (name, msgs)
+        r = simulate(s)
+        assert sum(len(m) for m in r.macrotimes) > 0, name
+    s = presets()["3-colour FCCS (PIE)"]
+    s.species[0].brightness = np.array([10000.0, 100, 100, 0])
+    assert any(lvl == "error" and "saturates" in m for lvl, m in check_settings(s))
+    # the estimate predicts the simulated count rate, also when saturated
+    s = SimSettings(box_size=[2000, 2000, 3000], sim_time=0.4, seed=1,
+                    species=[Species(D=40, N=40, brightness=[300, 0, 0, 0])])
+    est = float([m for lvl, m in check_settings(s) if "Expected" in m][0].split(":")[1].split("kHz")[0])
+    got = simulate(s).count_rates_khz()[0]
+    assert abs(got / est - 1) < 0.25
