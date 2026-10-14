@@ -79,9 +79,9 @@ const children = [
   h2("4.1  Identification"),
   colTable([
     ["Sim ID", "Unique short name of the simulation (e.g. S12)", "-", "Required", "row is skipped"],
-    ["File name", "Files are written as <name>_1.sim, <name>_2.sim, ...", "-", "Optional", "the Sim ID"],
+    ["File name", "Name of the simulation: its folder <Output folder>/<name>/ and its files <name>_1.sim, <name>_2.sim, ...", "-", "Optional", "the Sim ID"],
     ["Purpose / question", "What you want to learn from this simulation", "-", "Not used", "-"],
-    ["Output folder", "Folder for the files; must exist on the PC that runs PAMsim", "-", "Optional", "PAMsim's output folder"],
+    ["Output folder", "Main folder; each simulation gets its own subfolder in it (created automatically). Must exist on the PC that runs PAMsim", "-", "Optional", "PAMsim's output folder"],
     ["Status", "Idea / Planned / Running / Done / Analysed / Discarded", "-", "Not used", "-"],
     ["Priority", "Your ranking (1 = highest)", "-", "Not used", "-"],
   ]),
@@ -137,7 +137,9 @@ const children = [
   step([t("To check or change one simulation first: double-click it (or "), t("Load into editor", { bold: true }), t("). All values appear in the PAMsim window; press Start.")]),
   step([t("To run several: select them with Ctrl + click (single rows) or Shift + click (a range) and click "), t("Run selected", { bold: true }), t(".")]),
   p("PAMsim runs the selected simulations one after another, each with exactly the parameters of its own row - different boxes, durations, species, brightness and FRET are no problem. The Log tab shows --- S01 ---, --- S02 ---, ... with the count rates and the written files. Stop ends the whole sequence."),
-  bullet("Every simulation needs its own file name (or its own folder) - two rows with the same name and folder overwrite each other's files."),
+  bullet([t("Each simulation is written into its own folder named after its file name, e.g. "), t("C:\\Sims\\Crazy_2\\Crazy_2_1.sim", { font: "Consolas", size: 19 }), t(" - the folder is created automatically. Switch this off in PAMsim's Output box (Own folder per simulation) to write all files into the output folder directly.")]),
+  bullet("Every simulation needs its own file name - two rows with the same name and output folder write into the same folder and overwrite each other's files."),
+  bullet("Characters that Windows does not allow in names (< > : \" / \\ | ? *) are replaced by _."),
   bullet("If the output folder of a row does not exist on this PC, the files are written to the folder set in PAMsim; the Log says so."),
   bullet("PAMsim asks before running simulations that have a red check."),
 

@@ -71,6 +71,8 @@ TIPS = {
     "name": "File name; files are called <name>_1.sim, <name>_2.sim, ...",
     "nfiles": "Number of independent simulations with the same parameters (each saved as its own file).",
     "threads": "Number of CPU cores used.",
+    "ownfolder": "Each simulation is written into a subfolder <output folder>/<file name>/,\n"
+                 "created automatically - all its .sim, IRF and setup files stay together.",
     "ff": "Skips the random walk while a molecule is far from the focus (exact up to ~1e-12). Much faster.",
 }
 
@@ -626,6 +628,9 @@ class SimGUI:
         self.save_setup = tk.BooleanVar(value=True)
         ttk.Checkbutton(o, text="Save the setup next to the data", variable=self.save_setup).grid(
             row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        self.own_folder = tk.BooleanVar(value=True)
+        tip(ttk.Checkbutton(o, text="Own folder per simulation (named after the file name)",
+                            variable=self.own_folder), "ownfolder").grid(row=5, column=0, columnspan=4, sticky="w")
         o.columnconfigure(2, weight=1)
 
     def _build_run(self, parent):
@@ -971,7 +976,7 @@ class SimGUI:
             self.v["folder"].set(d)
 
     def _open_folder(self):
-        folder = self.v["folder"].get().strip()
+        folder = getattr(self, "_last_out_folder", None) or self.v["folder"].get().strip()
         if not os.path.isdir(folder):
             return
         try:
@@ -1057,6 +1062,7 @@ class SimGUI:
         if state.get("format") in (0, 1, 2):
             self.fmt.current(state["format"])
         self.save_setup.set(bool(state.get("save_json", True)))
+        self.own_folder.set(bool(state.get("own_folder", True)))
 
     def _on_close(self):
         if self.worker is not None and self.worker.is_alive():
@@ -1068,7 +1074,7 @@ class SimGUI:
             s = copy.copy(self.settings); s.maps = None
             state = {"setup": s.to_dict(), "folder": self.v["folder"].get(), "nfiles": self.v["nfiles"].get(),
                      "threads": self.v["threads"].get(), "format": self.fmt.current(),
-                     "save_json": self.save_setup.get()}
+                     "save_json": self.save_setup.get(), "own_folder": self.own_folder.get()}
             with open(self._state_path(), "w") as f:
                 json.dump(state, f)
         except Exception:  # noqa: BLE001 - never block closing
@@ -1116,6 +1122,8 @@ class SimGUI:
     def _start_jobs(self, jobs):
         """jobs: list of (label, settings, folder, number of files, format, save setup)."""
         self.cancel = threading.Event()
+        self._own_folder_flag = self.own_folder.get()  # read here: Tk variables only in the main thread
+        self._last_out_folder = None
         self.worker = threading.Thread(target=self._run, args=(jobs,), daemon=True)
         self.start_btn.configure(text="\u25a0  Stop")
         self.progress["value"] = 0
@@ -1153,7 +1161,12 @@ class SimGUI:
             q.put(("progress", (n_done + done / total) / n_total, f"{tag}: molecule {done}/{total}"))
         r = simulate(s, progress=progress, cancel=self.cancel)
         q.put(("status", f"{tag}: saving..."))
-        base = os.path.join(folder, f"{s.name}_{k + 1}")
+        name = safe_name(s.name)
+        if self._own_folder_flag:
+            folder = os.path.join(folder, name)
+        os.makedirs(folder, exist_ok=True)
+        self._last_out_folder = folder
+        base = os.path.join(folder, f"{name}_{k + 1}")
         written = []
         if fmt in (0, 2):
             written += r.save_sim(base + ".sim")
@@ -1238,8 +1251,8 @@ class SimGUI:
                     self.plot_btn.configure(state="normal")
                 elif kind == "done":
                     self.info_nb.select(1)
-                    self.status.configure(text=msg[1] + (f"  Files are in {self.v['folder'].get()}"
-                                                         if msg[1] == "Finished." else ""))
+                    where = getattr(self, "_last_out_folder", None) or self.v["folder"].get()
+                    self.status.configure(text=msg[1] + (f"  Files are in {where}" if msg[1] == "Finished." else ""))
                     if msg[1] == "Finished.":
                         self.progress["value"] = 1.0
                     self.start_btn.configure(text="▶  Start simulation")
@@ -1367,6 +1380,13 @@ class PlannerDialog:
             return
         self.win.destroy()
         self.gui._run_planner_rows(sel)
+
+
+def safe_name(name):
+    """File/folder name without characters Windows does not allow."""
+    bad = '<>:"/\\|?*'
+    out = "".join("_" if (ch in bad or ord(ch) < 32) else ch for ch in str(name)).strip().rstrip(".")
+    return out or "simulation"
 
 
 def _python_exe():

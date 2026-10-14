@@ -97,8 +97,9 @@ The window is organised in three steps:
 * The last setup and output folder are restored at the next start.  *Save /
   Open setup* store setups as JSON, and setups saved by Sim.m open too.
 
-Files are named like in Sim.m (`<name>_1.sim`, `<name>_2.sim`, ...; with a
-seed, file *k* uses seed + k − 1) and open in PAM via *Load TCSPC data → Pam
+Each simulation is written into its own folder `<output folder>/<name>/`
+(option *Own folder per simulation*, on by default). Files are named like in
+Sim.m (`<name>_1.sim`, `<name>_2.sim`, ...; with a seed, file *k* uses seed + k − 1) and open in PAM via *Load TCSPC data → Pam
 Simulation Files*.  Very large results are split into `<name>_1_part01.sim`,
 `_part02.sim`, ...: select all parts together in PAM.
 

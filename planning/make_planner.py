@@ -109,9 +109,9 @@ h.sheet_view.showGridLines = False
 GUIDE = [
     ("Identification", None, None, None, None),
     ("Sim ID", "Unique short name of the simulation (e.g. S12)", "-", "Required", "row is skipped"),
-    ("File name", "Files are written as <name>_1.sim, <name>_2.sim, ...", "-", "Optional", "the Sim ID"),
+    ("File name", "Name of the simulation: folder <Output folder>/<name>/ with files <name>_1.sim, ...", "-", "Optional", "the Sim ID"),
     ("Purpose / question", "What you want to learn from this simulation", "-", "Not used", "-"),
-    ("Output folder", "Folder for the files; must exist on the PC that runs PAMsim", "-", "Optional", "PAMsim's output folder"),
+    ("Output folder", "Main folder; each simulation gets its own subfolder (created automatically)", "-", "Optional", "PAMsim's output folder"),
     ("Status, Priority", "Your bookkeeping", "-", "Not used", "-"),
     ("Measurement", None, None, None, None),
     ("Box x, y, z", "Size of the simulation box; z = 0 gives 2D (membrane)", "nm", "Optional", "5000 each"),
