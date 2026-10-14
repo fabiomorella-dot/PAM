@@ -1174,12 +1174,11 @@ class SimGUI:
                                           filetypes=[("Excel planner", "*.xlsx"), ("All", "*.*")])
         if not path:
             return
+        if not ensure_package("openpyxl", "reading Excel planners", self.root):
+            return
         try:
             from .planner import read_planner
             rows = read_planner(path)
-        except ImportError:
-            messagebox.showerror(APP, "Reading Excel files needs openpyxl:  python -m pip install openpyxl")
-            return
         except Exception as err:  # noqa: BLE001
             messagebox.showerror(APP, f"Could not read the planner:\n{err}")
             return
@@ -1368,6 +1367,48 @@ class PlannerDialog:
             return
         self.win.destroy()
         self.gui._run_planner_rows(sel)
+
+
+def _python_exe():
+    """The console python.exe belonging to the running interpreter (also when started with pythonw)."""
+    exe = sys.executable
+    folder, name = os.path.split(exe)
+    if name.lower() == "pythonw.exe" and os.path.exists(os.path.join(folder, "python.exe")):
+        return os.path.join(folder, "python.exe")
+    return exe
+
+
+def ensure_package(module, purpose, parent=None):
+    """Import ``module``; if it is missing, offer to pip-install it into this Python."""
+    import importlib
+    try:
+        importlib.import_module(module)
+        return True
+    except ImportError:
+        pass
+    exe = _python_exe()
+    if not messagebox.askyesno(APP, f"The package '{module}' is needed for {purpose} but is not installed\n"
+                                    f"for the Python that runs PAMsim:\n{exe}\n\nInstall it now (needs internet)?",
+                               parent=parent):
+        return False
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        out = subprocess.run([exe, "-m", "pip", "install", module], capture_output=True, text=True,
+                             creationflags=flags, timeout=600)
+    except Exception as err:  # noqa: BLE001
+        messagebox.showerror(APP, f"Installation failed:\n{err}\n\nRun in a terminal:\n\"{exe}\" -m pip install {module}",
+                             parent=parent)
+        return False
+    importlib.invalidate_caches()
+    try:
+        importlib.import_module(module)
+        messagebox.showinfo(APP, f"'{module}' was installed.", parent=parent)
+        return True
+    except ImportError:
+        tail = (out.stderr or out.stdout or "").strip().splitlines()[-5:]
+        messagebox.showerror(APP, f"Installation of '{module}' failed:\n" + "\n".join(tail) +
+                             f"\n\nRun in a terminal:\n\"{exe}\" -m pip install {module}", parent=parent)
+        return False
 
 
 def save_setup(settings, path, seed=None):
