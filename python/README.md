@@ -84,6 +84,8 @@ The window is organised in three steps:
 
 * **Presets** (top right): 1-colour FCS, 2- and 3-colour FCCS with PIE,
   smFRET bursts.
+* **Load from planner...**: reads `planning/PAMsim_simulation_planner.xlsx`;
+  load one simulation into the editor or run several selected ones in a row.
 * **Check** tab: updates live and warns about settings that bias the result.
   Examples are a brightness close to the sampling frequency (saturated
   focus), diffusion steps that are too coarse, or a box that is too small.

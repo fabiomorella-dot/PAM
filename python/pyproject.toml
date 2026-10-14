@@ -13,7 +13,7 @@ dependencies = ["numpy>=1.22", "numba>=0.57", "scipy>=1.8"]
 
 [project.optional-dependencies]
 plot = ["matplotlib"]
-gui = ["matplotlib", "sv-ttk", "pillow"]
+gui = ["matplotlib", "sv-ttk", "pillow", "openpyxl"]
 test = ["pytest"]
 
 [project.gui-scripts]

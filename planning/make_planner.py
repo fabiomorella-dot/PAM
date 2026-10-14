@@ -1,8 +1,15 @@
-"""Generate PAMsim_simulation_planner.xlsx (one row per simulation, up to MAX_SPECIES species side by side).
+"""Generate a PAMsim simulation planner (Excel), one row per simulation.
 
-    python make_planner.py            # writes the planner next to this script
+Usage (in a terminal, inside the "planning" folder):
 
-Change MAX_SPECIES below to get more species blocks.
+    python make_planner.py                         # new planner with the example rows
+    python make_planner.py --empty                 # new, empty planner
+    python make_planner.py --species 10            # 10 species blocks per simulation instead of 6
+    python make_planner.py -o my_project.xlsx      # choose the file name
+    python make_planner.py --rows 200              # prepare 200 simulation rows instead of 60
+
+An existing file is never overwritten unless you add --force.
+Needs:  python -m pip install openpyxl
 """
 import os
 
@@ -13,10 +20,25 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter as L
 from openpyxl.worksheet.datavalidation import DataValidation
 
-MAX_SPECIES = 6
-N_ROWS = 60                      # simulation rows prepared
+import argparse
+import sys
+
+_ap = argparse.ArgumentParser(description="Generate a PAMsim simulation planner (Excel).")
+_ap.add_argument("-o", "--output", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                         "PAMsim_simulation_planner.xlsx"),
+                 help="output file (default: PAMsim_simulation_planner.xlsx next to this script)")
+_ap.add_argument("--species", type=int, default=6, help="species blocks per simulation (default 6)")
+_ap.add_argument("--rows", type=int, default=60, help="simulation rows prepared (default 60)")
+_ap.add_argument("--empty", action="store_true", help="no example rows")
+_ap.add_argument("--force", action="store_true", help="overwrite an existing file")
+ARGS = _ap.parse_args()
+if os.path.exists(ARGS.output) and not ARGS.force:
+    sys.exit(f"{ARGS.output} already exists - choose another name with -o, or add --force to overwrite it.")
+
+MAX_SPECIES = max(1, ARGS.species)
+N_ROWS = max(1, ARGS.rows)       # simulation rows prepared
 FIRST, LAST = 4, 4 + N_ROWS - 1  # data rows (rows 1-3: bands and headers)
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "PAMsim_simulation_planner.xlsx")
+OUT = ARGS.output
 
 F = "Arial"
 HDR = PatternFill("solid", fgColor="1F3A5F")
@@ -73,7 +95,7 @@ lines = [
     ("Example rows", Font(name=F, size=12, bold=True)),
     ("S00 is a worked example (realistic 3-colour FCCS mixture with a FRET pair). S01-S11 are the simulations from your earlier", None),
     ("spreadsheet (box 5000 nm, wr 200 nm, wz 1000 nm assumed) - the checks show which of them saturate. Overwrite or delete rows freely.", None),
-    (f"More than {MAX_SPECIES} species? Change MAX_SPECIES in planning/make_planner.py and run it again.", None),
+    (f"More than {MAX_SPECIES} species? Run  python make_planner.py --species 10 -o new_planner.xlsx  (see the README).", None),
 ]
 for i, (t, f) in enumerate(lines, start=1):
     c = h.cell(row=i, column=2, value=t)
@@ -356,6 +378,8 @@ sims = [
      "Planned", 3, 150, [("Species 1", 35, 200, [1e4, 7e3, 5e3], lt3, None), ("Species 2", 35, 2000, [1e4, 0, 5e3], lt3, None),
                          ("Species 3", 35, 4000, [2e4, 7e3, 0], lt3, None)]),
 ]
+if ARGS.empty:
+    sims = []
 for k, (sid, name, purpose, folder, status, prio, dur, species) in enumerate(sims):
     r = FIRST + k
     vals = {"id": sid, "name": name, "purpose": purpose, "folder": folder, "status": status, "prio": prio,
@@ -367,6 +391,8 @@ for k, (sid, name, purpose, folder, status, prio, dur, species) in enumerate(sim
     for key, v in vals.items():
         s[f"{C[key]}{r}"] = v
     for sidx, (nm, D, N, b, lt, fret) in enumerate(species, start=1):
+        if sidx > MAX_SPECIES:
+            break
         sk = lambda kk: C[f"s{sidx}_{kk}"]  # noqa: E731
         s[f"{sk('nm')}{r}"] = nm; s[f"{sk('D')}{r}"] = D; s[f"{sk('N')}{r}"] = N
         for ch in range(3):
@@ -384,4 +410,5 @@ wb.move_sheet("Lists", offset=10)
 wb.move_sheet("Calc", offset=10)
 wb.active = 1
 wb.save(OUT)
-print("saved", OUT, "-", len(cols), "columns")
+print(f"saved {OUT}  ({N_ROWS} simulation rows, {MAX_SPECIES} species blocks, {len(cols)} columns)")
+print("Open it in Excel; the calculated cells fill in when Excel opens the file.")

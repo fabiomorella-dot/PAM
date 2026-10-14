@@ -25,9 +25,26 @@ Double-click **`Update_PAMsim.bat`** (or run `git pull` in this folder).
 ## Planning simulations
 
 `planning/PAMsim_simulation_planner.xlsx` – one row per simulation with up to six
-species side by side (D, molecules, brightness and lifetime per colour, FRET);
-it calculates FRET efficiencies, concentrations, expected count rates, photons and memory
-and flags saturating brightness or too coarse time steps before you run anything.
+species side by side (D, molecules, brightness and lifetime per colour, FRET).
+It calculates FRET efficiencies, concentrations, expected count rates, photons
+and memory, and flags saturating brightness or too coarse time steps before
+you run anything.
+
+In PAMsim, **Load from planner...** opens the planner: double-click a
+simulation to load it into the editor, or select several and press **Run
+selected** to simulate them one after another.
+
+A fresh planner (for example with more species blocks) is made with
+`planning/make_planner.py` – in a terminal in the `planning` folder:
+
+```
+python make_planner.py -o my_planner.xlsx              # new planner with example rows
+python make_planner.py --empty -o my_planner.xlsx      # without the examples
+python make_planner.py --species 10 -o my_planner.xlsx # 10 species blocks per simulation
+python make_planner.py --rows 200 -o my_planner.xlsx   # 200 simulation rows
+```
+
+It never overwrites an existing file unless you add `--force`.
 
 ## More
 

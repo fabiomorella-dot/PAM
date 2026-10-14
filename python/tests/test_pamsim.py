@@ -336,3 +336,23 @@ def test_gui_presets_and_checks():
     est = float([m for lvl, m in check_settings(s) if "Expected" in m][0].split(":")[1].split("kHz")[0])
     got = simulate(s).count_rates_khz()[0]
     assert abs(got / est - 1) < 0.25
+
+
+def test_read_planner():
+    pytest.importorskip("openpyxl")
+    from pamsim.planner import read_planner
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "planning", "PAMsim_simulation_planner.xlsx")
+    rows = read_planner(path)
+    ids = [r.sim_id for r in rows]
+    assert ids[:3] == ["S00", "S01", "S02"] and "S11" in ids
+    s00 = rows[0].settings
+    assert len(s00.species) == 4 and s00.species[0].color == 3
+    assert list(s00.species[2].brightness[:3]) == [0, 70, 50]
+    fret = s00.species[3]
+    assert fret.fret == 2 and fret.R[1, 0] == 50 and fret.R0[1, 0] == 63
+    assert rows[0].settings.sim_time == 60 and rows[0].folder.endswith("Simulation")
+    s11 = rows[ids.index("S11")]
+    assert [sp.N for sp in s11.settings.species] == [200, 2000, 4000]
+    s01 = rows[1].settings
+    s01.sim_time = 0.05
+    assert simulate(s01).macrotimes[0].size > 0

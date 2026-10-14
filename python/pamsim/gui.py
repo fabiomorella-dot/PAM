@@ -416,6 +416,7 @@ class SimGUI:
         ttk.Button(r, text="Help", command=self._help).pack(side="right", padx=(6, 0))
         ttk.Button(r, text="Save setup...", command=self._save_setup).pack(side="right", padx=(6, 0))
         ttk.Button(r, text="Open setup...", command=self._load_setup).pack(side="right", padx=(6, 0))
+        ttk.Button(r, text="Load from planner...", command=self._open_planner).pack(side="right", padx=(6, 0))
         ttk.Separator(r, orient="vertical").pack(side="right", fill="y", padx=8)
         ttk.Button(r, text="Apply", command=self._apply_preset).pack(side="right", padx=(6, 0))
         self.preset_cb = ttk.Combobox(r, values=list(presets()), state="readonly", width=24)
@@ -1110,41 +1111,28 @@ class SimGUI:
         if errors and not messagebox.askyesno(APP, "There are problems with the settings:\n\n- " +
                                               "\n- ".join(errors) + "\n\nSimulate anyway?"):
             return
+        self._start_jobs([("", copy.deepcopy(self.settings), folder, nfiles, self.fmt.current(), self.save_setup.get())])
+
+    def _start_jobs(self, jobs):
+        """jobs: list of (label, settings, folder, number of files, format, save setup)."""
         self.cancel = threading.Event()
-        job = (copy.deepcopy(self.settings), folder, nfiles, self.fmt.current(), self.save_setup.get())
-        self.worker = threading.Thread(target=self._run, args=job, daemon=True)
-        self.start_btn.configure(text="■  Stop")
+        self.worker = threading.Thread(target=self._run, args=(jobs,), daemon=True)
+        self.start_btn.configure(text="\u25a0  Stop")
         self.progress["value"] = 0
         self.last_files = []
         self.worker.start()
 
-    def _run(self, settings, folder, nfiles, fmt, save_json):
+    def _run(self, jobs):
         q = self.queue
+        n_total = sum(j[3] for j in jobs)
+        n_done = 0
         try:
-            for k in range(nfiles):
-                s = copy.deepcopy(settings)
-                if settings.seed is not None:
-                    s.seed = settings.seed + k
-                q.put(("status", f"File {k + 1}/{nfiles}: preparing (the very first run compiles for ~15 s)..."))
-
-                def progress(done, total, k=k):
-                    q.put(("progress", (k + done / total) / nfiles, f"File {k + 1}/{nfiles}: molecule {done}/{total}"))
-                r = simulate(s, progress=progress, cancel=self.cancel)
-                q.put(("status", f"File {k + 1}/{nfiles}: saving..."))
-                base = os.path.join(folder, f"{s.name}_{k + 1}")
-                written = []
-                if fmt in (0, 2):
-                    written += r.save_sim(base + ".sim")
-                if fmt in (1, 2):
-                    written.append(r.save_npz(base + ".npz"))
-                if save_json:
-                    save_setup(s, base + "_setup.json", seed=r.seed)
-                    written.append(base + "_setup.json")
-                rates = ", ".join(f"{x:.3g}" for x in r.count_rates_khz() if x > 0) or "0"
-                q.put(("log", f"{os.path.basename(base)}: {r.elapsed:.1f} s, "
-                              f"{sum(len(m) for m in r.macrotimes) / 1e6:.3g} M photons, rates [kHz] {rates}\n"
-                              f"  → " + ", ".join(os.path.basename(w) for w in written)))
-                q.put(("result", r, written))
+            for label, settings, folder, nfiles, fmt, save_json in jobs:
+                if label:
+                    q.put(("log", f"--- {label} ---"))
+                for k in range(nfiles):
+                    self._run_file(settings, folder, nfiles, fmt, save_json, k, label, n_done, n_total)
+                    n_done += 1
             q.put(("done", "Finished."))
         except SimulationCancelled:
             q.put(("done", "Stopped."))
@@ -1152,6 +1140,86 @@ class SimGUI:
             q.put(("error", "Out of memory: shorten the simulation time and use 'Number of files' instead."))
         except Exception:  # noqa: BLE001
             q.put(("error", traceback.format_exc()))
+
+    def _run_file(self, settings, folder, nfiles, fmt, save_json, k, label, n_done, n_total):
+        q = self.queue
+        tag = (f"{label}: " if label else "") + f"file {k + 1}/{nfiles}"
+        s = copy.deepcopy(settings)
+        if settings.seed is not None:
+            s.seed = settings.seed + k
+        q.put(("status", f"{tag}: preparing (the very first run compiles for ~15 s)..."))
+
+        def progress(done, total):
+            q.put(("progress", (n_done + done / total) / n_total, f"{tag}: molecule {done}/{total}"))
+        r = simulate(s, progress=progress, cancel=self.cancel)
+        q.put(("status", f"{tag}: saving..."))
+        base = os.path.join(folder, f"{s.name}_{k + 1}")
+        written = []
+        if fmt in (0, 2):
+            written += r.save_sim(base + ".sim")
+        if fmt in (1, 2):
+            written.append(r.save_npz(base + ".npz"))
+        if save_json:
+            save_setup(s, base + "_setup.json", seed=r.seed)
+            written.append(base + "_setup.json")
+        rates = ", ".join(f"{x:.3g}" for x in r.count_rates_khz() if x > 0) or "0"
+        q.put(("log", f"{os.path.basename(base)}: {r.elapsed:.1f} s, "
+                      f"{sum(len(m) for m in r.macrotimes) / 1e6:.3g} M photons, rates [kHz] {rates}\n"
+                      f"  \u2192 " + ", ".join(os.path.basename(w) for w in written)))
+        q.put(("result", r, written))
+
+    # ------------------------------------------------------------- Excel planner
+    def _open_planner(self):
+        path = filedialog.askopenfilename(title="Open the simulation planner",
+                                          filetypes=[("Excel planner", "*.xlsx"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            from .planner import read_planner
+            rows = read_planner(path)
+        except ImportError:
+            messagebox.showerror(APP, "Reading Excel files needs openpyxl:  python -m pip install openpyxl")
+            return
+        except Exception as err:  # noqa: BLE001
+            messagebox.showerror(APP, f"Could not read the planner:\n{err}")
+            return
+        if not rows:
+            messagebox.showinfo(APP, "No simulations found (fill in a Sim ID on the Simulations sheet).")
+            return
+        PlannerDialog(self, rows, os.path.basename(path))
+
+    def _load_planner_row(self, row):
+        self.settings = copy.deepcopy(row.settings)
+        self.sel = 0
+        self._load_all()
+        self.v["name"].set(row.settings.name)
+        self.v["nfiles"].set(str(row.nfiles))
+        self.fmt.current(row.fmt)
+        if row.folder and os.path.isdir(row.folder):
+            self.v["folder"].set(row.folder)
+        elif row.folder:
+            self._log(f"planner folder not found on this computer, keeping {self.v['folder'].get()}:\n  {row.folder}")
+        self._log(f"loaded {row.sim_id} ({row.settings.name}) from the planner")
+
+    def _run_planner_rows(self, rows):
+        if self.worker is not None and self.worker.is_alive():
+            messagebox.showinfo(APP, "A simulation is already running.")
+            return
+        fallback = self.v["folder"].get().strip()
+        jobs, notes = [], []
+        for row in rows:
+            folder = row.folder if row.folder and os.path.isdir(row.folder) else fallback
+            if folder != row.folder:
+                notes.append(f"{row.sim_id}: folder not found, using {fallback}")
+            jobs.append((row.sim_id, copy.deepcopy(row.settings), folder, row.nfiles, row.fmt, self.save_setup.get()))
+        if not os.path.isdir(fallback) and any(j[2] == fallback for j in jobs):
+            messagebox.showerror(APP, f"The output folder in PAMsim does not exist:\n{fallback}")
+            return
+        for n in notes:
+            self._log(n)
+        self._log(f"running {len(jobs)} simulation(s) from the planner: " + ", ".join(j[0] for j in jobs))
+        self.info_nb.select(1)
+        self._start_jobs(jobs)
 
     def _poll(self):
         try:
@@ -1236,6 +1304,70 @@ class SimGUI:
         canvas.draw()
         NavigationToolbar2Tk(canvas, win)
         canvas.get_tk_widget().pack(fill="both", expand=True)
+
+
+class PlannerDialog:
+    """Pick simulations from the Excel planner: load one into the editor or run several."""
+
+    def __init__(self, gui, rows, filename):
+        self.gui, self.rows = gui, rows
+        w = self.win = tk.Toplevel(gui.root)
+        w.title(f"{APP} - simulations in {filename}")
+        w.transient(gui.root)
+        ttk.Label(w, text="Select one simulation to load it into the editor, or several (Ctrl / Shift + click) "
+                          "to run them one after another.", style="Hint.TLabel").pack(anchor="w", padx=10, pady=(10, 4))
+        cols = ("id", "name", "species", "time", "status", "check", "purpose")
+        heads = ("Sim ID", "File name", "Species", "Duration [s]", "Status", "Check", "Purpose")
+        widths = (60, 230, 60, 80, 80, 300, 300)
+        frame = ttk.Frame(w)
+        frame.pack(fill="both", expand=True, padx=10)
+        self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended", height=14)
+        for c, hd, wd in zip(cols, heads, widths):
+            self.tree.heading(c, text=hd)
+            self.tree.column(c, width=wd, anchor="w", stretch=c in ("check", "purpose"))
+        sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        self.tree.tag_configure("bad", foreground=LEVEL_COLORS["error"])
+        self.tree.tag_configure("warn", foreground=LEVEL_COLORS["warn"])
+        for i, r in enumerate(rows):
+            tag = "bad" if r.check.startswith("\u2716") else "warn" if r.check.startswith("\u26a0") else ""
+            self.tree.insert("", "end", iid=str(i), tags=(tag,), values=(
+                r.sim_id, r.settings.name, len(r.settings.species), f"{r.settings.sim_time:g}",
+                r.status, r.check, r.purpose))
+        self.tree.bind("<Double-1>", lambda e: self._load())
+        b = ttk.Frame(w)
+        b.pack(fill="x", padx=10, pady=10)
+        ttk.Button(b, text="Close", command=w.destroy).pack(side="right")
+        ttk.Button(b, text="\u25b6  Run selected", style="Accent.TButton", command=self._run).pack(side="right", padx=6)
+        ttk.Button(b, text="Load into editor", command=self._load).pack(side="right")
+        ttk.Label(b, text="Files go to the planner's output folder, or to PAMsim's folder if it does not exist here.",
+                  style="Hint.TLabel").pack(side="left")
+
+    def _selected(self):
+        return [self.rows[int(i)] for i in self.tree.selection()]
+
+    def _load(self):
+        sel = self._selected()
+        if len(sel) != 1:
+            messagebox.showinfo(APP, "Select exactly one simulation to load it into the editor.", parent=self.win)
+            return
+        self.gui._load_planner_row(sel[0])
+        self.win.destroy()
+
+    def _run(self):
+        sel = self._selected()
+        if not sel:
+            messagebox.showinfo(APP, "Select the simulations to run.", parent=self.win)
+            return
+        bad = [r.sim_id for r in sel if r.check.startswith("\u2716")]
+        if bad and not messagebox.askyesno(APP, "These simulations have red checks in the planner "
+                                                "(e.g. saturated brightness):\n" + ", ".join(bad) +
+                                           "\n\nRun them anyway?", parent=self.win):
+            return
+        self.win.destroy()
+        self.gui._run_planner_rows(sel)
 
 
 def save_setup(settings, path, seed=None):
