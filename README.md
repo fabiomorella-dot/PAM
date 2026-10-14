@@ -24,8 +24,9 @@ Double-click **`Update_PAMsim.bat`** (or run `git pull` in this folder).
 
 ## Planning simulations
 
-`planning/PAMsim_simulation_planner.xlsx` – one row per simulation plus a species
-sheet; it calculates concentrations, expected count rates, photons and memory
+`planning/PAMsim_simulation_planner.xlsx` – one row per simulation with up to six
+species side by side (D, molecules, brightness and lifetime per colour, FRET);
+it calculates FRET efficiencies, concentrations, expected count rates, photons and memory
 and flags saturating brightness or too coarse time steps before you run anything.
 
 ## More

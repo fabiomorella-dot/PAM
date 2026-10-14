@@ -1,14 +1,25 @@
+"""Generate PAMsim_simulation_planner.xlsx (one row per simulation, up to MAX_SPECIES species side by side).
+
+    python make_planner.py            # writes the planner next to this script
+
+Change MAX_SPECIES below to get more species blocks.
+"""
 import os
+
 from openpyxl import Workbook
+from openpyxl.comments import Comment
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter as L
 from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.formatting.rule import FormulaRule
-from openpyxl.comments import Comment
+
+MAX_SPECIES = 6
+N_ROWS = 60                      # simulation rows prepared
+FIRST, LAST = 4, 4 + N_ROWS - 1  # data rows (rows 1-3: bands and headers)
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "PAMsim_simulation_planner.xlsx")
 
 F = "Arial"
 HDR = PatternFill("solid", fgColor="1F3A5F")
-BAND = {"id": "2A78D6", "gen": "3D6B9E", "foc": "5A7FA8", "out": "6C8EAF", "chk": "7A7A7A", "res": "4E8A5B"}
 INPUT = PatternFill("solid", fgColor="FFF6C7")
 CALC = PatternFill("solid", fgColor="EEF2F6")
 thin = Side(style="thin", color="C9CED6")
@@ -16,11 +27,16 @@ BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
 BLUE = Font(name=F, size=10, color="0000FF")
 BLACK = Font(name=F, size=10, color="000000")
 WHITE_B = Font(name=F, size=10, bold=True, color="FFFFFF")
-N_ROWS_SIM, N_ROWS_SP = 60, 300
+BAND = {"id": "2A78D6", "gen": "3D6B9E", "foc": "5A7FA8", "fret": "7D5BA6", "out": "6C8EAF",
+        "chk": "6E6E6E", "res": "4E8A5B"}
+SP_BAND = ["1B6F8A", "8A5A1B", "2E7D4F", "7A2E5E", "4F4F8A", "6B6B1B", "1B6B6B", "8A1B1B"]
+RED = PatternFill("solid", fgColor="F8D3D3")
+ORANGE = PatternFill("solid", fgColor="FCE6C4")
+GREEN = PatternFill("solid", fgColor="D5EFD5")
 
 wb = Workbook()
 
-# ------------------------------------------------------------------ How to use
+# ====================================================================== How to use
 h = wb.active
 h.title = "How to use"
 lines = [
@@ -28,10 +44,15 @@ lines = [
     ("Plan your simulations here, then type the values into PAMsim (or Sim.m).", Font(name=F, size=10, italic=True, color="555555")),
     ("", None),
     ("How it works", Font(name=F, size=12, bold=True)),
-    ("1.  Sheet 'Simulations': one row per simulation (measurement settings, output, status, results).", None),
-    ("2.  Sheet 'Species': one row per molecule species. Link it to its simulation with the Sim ID (dropdown).", None),
-    ("3.  Grey columns are calculated automatically: concentration, expected count rates, photons, memory and checks.", None),
-    ("4.  Fix every red check before running a simulation; orange checks bias the results slightly.", None),
+    ("•  Sheet 'Simulations': ONE ROW PER SIMULATION. Left: identification and measurement settings.", None),
+    (f"•  Then {MAX_SPECIES} species blocks side by side (Species 1, Species 2, ...). Each species has its own name, D, number of", None),
+    ("    molecules N, brightness and lifetime per colour, and FRET (type and dye distances R). Leave unused species blocks empty.", None),
+    ("•  Brightness 0 = this species carries no dye of that colour (e.g. a green-red complex: B1 = 0, B2 = 70, B3 = 50).", None),
+    ("•  FRET: Förster radii R0 are set once per simulation (purple block); per species choose FRET type and distances R.", None),
+    ("    The FRET efficiency E = 1 / (1 + (R/R0)^6) is calculated for you (grey cells).", None),
+    ("•  Grey cells are calculated: concentration, FRET efficiency, a check per species, expected count rates, photons, memory.", None),
+    ("•  Use the + / - buttons above the columns (Excel grouping) to fold species blocks away.", None),
+    ("•  Fix every red check before running a simulation; orange checks bias the results slightly.", None),
     ("", None),
     ("Colour code", Font(name=F, size=12, bold=True)),
     ("Yellow cells with blue text = your input.   Grey cells with black text = formulas (do not overwrite).", None),
@@ -42,306 +63,325 @@ lines = [
     ("•  One diffusion step sqrt(2·D·dt) should be < 10% of wr; otherwise raise the sampling frequency.", None),
     ("•  Box >= 8·wr laterally and >= 3·wz axially.", None),
     ("•  Memory ≈ 12 bytes per photon and file. For very long runs use several files (Number of files) instead.", None),
-    ("•  Expected count rates: Gaussian focus incl. saturation (as in PAMsim's Check panel); FRET and crosstalk are ignored.", None),
+    ("•  Expected count rates: Gaussian focus incl. saturation (as in PAMsim's Check panel). FRET and crosstalk are ignored,", None),
+    ("    so with FRET the donor channel gets fewer and the acceptor channel more photons than estimated.", None),
     ("", None),
     ("Units", Font(name=F, size=12, bold=True)),
     ("nm (box, wr, wz) · kHz (sampling frequency, brightness, background) · s (duration) · ns (lifetime, microtime range)", None),
-    ("µm²/s (D) · nM (concentration) · kHz (count rates) · million photons · GB", None),
+    ("µm²/s (D) · nM (concentration) · Å or nm for R0 and R (use the same unit for both) · kHz (count rates) · million photons · GB", None),
     ("", None),
     ("Example rows", Font(name=F, size=12, bold=True)),
-    ("S00 is a worked example with realistic values. S01-S11 are the simulations from your earlier spreadsheet", None),
-    ("(box 5000 nm assumed, wr 200 nm, wz 1000 nm) - the checks show which of them saturate. Delete or overwrite rows freely.", None),
+    ("S00 is a worked example (realistic 3-colour FCCS mixture with a FRET pair). S01-S11 are the simulations from your earlier", None),
+    ("spreadsheet (box 5000 nm, wr 200 nm, wz 1000 nm assumed) - the checks show which of them saturate. Overwrite or delete rows freely.", None),
+    (f"More than {MAX_SPECIES} species? Change MAX_SPECIES in planning/make_planner.py and run it again.", None),
 ]
 for i, (t, f) in enumerate(lines, start=1):
     c = h.cell(row=i, column=2, value=t)
     c.font = f or Font(name=F, size=10)
 h.column_dimensions["A"].width = 3
-h.column_dimensions["B"].width = 120
-h["B11"].fill = INPUT
+h.column_dimensions["B"].width = 125
+h["B16"].fill = INPUT
 h.sheet_view.showGridLines = False
 
-# ------------------------------------------------------------------ Lists
+# ====================================================================== Lists
 ls = wb.create_sheet("Lists")
-lists = {
-    "A": ("Status", ["Idea", "Planned", "Running", "Done", "Analysed", "Discarded"]),
-    "B": ("Scan type", ["Point", "Raster scan", "Line scan", "Circle scan"]),
-    "C": ("Yes/No", ["Yes", "No"]),
-    "D": ("FRET", ["No FRET", "Static FRET", "Dynamic FRET"]),
-    "E": ("Format", [".sim", ".npz", "both"]),
-}
-for col, (title, vals) in lists.items():
+for col, (title, vals) in {"A": ("Status", ["Idea", "Planned", "Running", "Done", "Analysed", "Discarded"]),
+                           "B": ("Scan type", ["Point", "Raster scan", "Line scan", "Circle scan"]),
+                           "C": ("Yes/No", ["Yes", "No"]),
+                           "D": ("FRET", ["No FRET", "Static FRET", "Dynamic FRET"]),
+                           "E": ("Format", [".sim", ".npz", "both"])}.items():
     ls[f"{col}1"] = title
-    ls[f"{col}1"].font = Font(name=F, bold=True)
     for i, v in enumerate(vals, start=2):
         ls[f"{col}{i}"] = v
-        ls[f"{col}{i}"].font = Font(name=F)
 ls.sheet_state = "hidden"
 
-# ------------------------------------------------------------------ Simulations
+# ====================================================================== Simulations: column layout
 s = wb.create_sheet("Simulations")
-sim_cols = [  # key, header, width, band, kind(input/calc), comment
-    ("id", "Sim ID", 8, "id", "in", "Unique short ID, e.g. S12. Used to link species."),
-    ("name", "File name", 26, "id", "in", "PAMsim 'File name': files become <name>_1.sim, ..."),
-    ("purpose", "Purpose / question", 40, "id", "in", None),
-    ("folder", "Output folder", 34, "id", "in", None),
-    ("status", "Status", 11, "id", "in", None),
-    ("prio", "Priority", 8, "id", "in", "1 = highest"),
-    ("bx", "Box x [nm]", 9, "gen", "in", None),
-    ("by", "Box y [nm]", 9, "gen", "in", None),
-    ("bz", "Box z [nm]", 9, "gen", "in", "0 = 2D (membrane)"),
-    ("freq", "Sampling freq. [kHz]", 10, "gen", "in", None),
-    ("dur", "Duration [s]", 9, "gen", "in", None),
-    ("frames", "Frames", 7, "gen", "in", None),
-    ("mir", "Microtime range [ns]", 10, "gen", "in", None),
-    ("scan", "Scan type", 11, "gen", "in", None),
-    ("ncol", "Colours", 7, "gen", "in", "Number of colours / PIE lasers (1-4)"),
-    ("bg", "Background?", 9, "gen", "in", None),
-    ("bgk", "Background [kHz/ch]", 10, "gen", "in", None),
-    ("irf", "IRF?", 6, "gen", "in", None),
-    ("irfw", "IRF width [ps]", 8, "gen", "in", None),
-    ("wr", "wr [nm]", 7, "foc", "in", "1/e² radius, same for all colours here"),
-    ("wz", "wz [nm]", 7, "foc", "in", None),
-    ("nfiles", "Number of files", 8, "out", "in", None),
-    ("seed", "Seed", 8, "out", "in", "Empty = random"),
-    ("fmt", "Format", 7, "out", "in", None),
-    ("nsp", "Species", 8, "chk", "calc", None),
-    ("ntot", "Total molecules", 9, "chk", "calc", None),
-    ("r1", "Exp. rate ch1 [kHz]", 10, "chk", "calc", None),
-    ("r2", "Exp. rate ch2 [kHz]", 10, "chk", "calc", None),
-    ("r3", "Exp. rate ch3 [kHz]", 10, "chk", "calc", None),
-    ("r4", "Exp. rate ch4 [kHz]", 10, "chk", "calc", None),
-    ("ph", "Photons per file [M]", 10, "chk", "calc", None),
-    ("mem", "Memory per file [GB]", 10, "chk", "calc", None),
-    ("step", "Diff. step / wr (max)", 10, "chk", "calc", "Largest diffusion step of all species divided by wr; keep < 0.1"),
-    ("check", "Check", 44, "chk", "calc", None),
-    ("date", "Date run", 11, "res", "in", None),
-    ("runtime", "Run time [min]", 9, "res", "in", None),
-    ("fitD", "Fitted D [µm²/s]", 10, "res", "in", None),
-    ("fitc", "Fitted c [nM]", 9, "res", "in", None),
-    ("notes", "Result notes", 40, "res", "in", None),
+cols = []  # (key, header, width, band_key, band_title, kind, comment)
+
+
+def add(key, head, width, band, band_title, kind="in", comment=None):
+    cols.append((key, head, width, band, band_title, kind, comment))
+
+
+add("id", "Sim ID", 7, "id", "Identification", comment="Unique short ID, e.g. S12")
+add("name", "File name", 24, "id", "Identification", comment="PAMsim 'File name': files become <name>_1.sim, ...")
+add("purpose", "Purpose / question", 34, "id", "Identification")
+add("folder", "Output folder", 28, "id", "Identification")
+add("status", "Status", 10, "id", "Identification")
+add("prio", "Priority", 7, "id", "Identification", comment="1 = highest")
+for k, hd, w, com in (("bx", "Box x [nm]", 8, None), ("by", "Box y [nm]", 8, None), ("bz", "Box z [nm]", 8, "0 = 2D (membrane)"),
+                      ("freq", "Sampling freq. [kHz]", 9, None), ("dur", "Duration [s]", 8, None), ("frames", "Frames", 7, None),
+                      ("mir", "Microtime range [ns]", 9, None), ("scan", "Scan type", 10, None),
+                      ("ncol", "Colours", 7, "Number of colours / PIE lasers (1-3 in this planner)"),
+                      ("bg", "Background?", 9, None), ("bgk", "Background [kHz/ch]", 9, None), ("irf", "IRF?", 6, None),
+                      ("irfw", "IRF width [ps]", 7, None)):
+    add(k, hd, w, "gen", "Measurement", comment=com)
+add("wr", "wr [nm]", 7, "foc", "Focus", comment="1/e² radius, same for all colours here")
+add("wz", "wz [nm]", 7, "foc", "Focus")
+add("r012", "R0 1→2", 7, "fret", "Förster radii R0", comment="Förster radius donor colour 1 → acceptor colour 2 (Å or nm)")
+add("r013", "R0 1→3", 7, "fret", "Förster radii R0")
+add("r023", "R0 2→3", 7, "fret", "Förster radii R0")
+SP_FIELDS = [  # key, header, width, kind
+    ("nm", "Name", 14, "in"), ("D", "D [µm²/s]", 8, "in"), ("N", "Molecules N", 9, "in"),
+    ("b1", "Bright. 1 [kHz]", 8, "in"), ("b2", "Bright. 2 [kHz]", 8, "in"), ("b3", "Bright. 3 [kHz]", 8, "in"),
+    ("t1", "Lifetime 1 [ns]", 8, "in"), ("t2", "Lifetime 2 [ns]", 8, "in"), ("t3", "Lifetime 3 [ns]", 8, "in"),
+    ("fret", "FRET", 11, "in"), ("R12", "R 1→2", 7, "in"), ("R13", "R 1→3", 7, "in"), ("R23", "R 2→3", 7, "in"),
+    ("E12", "E 1→2", 7, "calc"), ("E13", "E 1→3", 7, "calc"), ("E23", "E 2→3", 7, "calc"),
+    ("c", "Conc. [nM]", 8, "calc"), ("chk", "Check", 25, "calc"),
 ]
-SC = {k: L(i + 1) for i, (k, *_r) in enumerate(sim_cols)}
-band_names = {"id": "Identification", "gen": "Measurement", "foc": "Focus", "out": "Output",
-              "chk": "Automatic estimates and checks", "res": "Results"}
-# band row 1, header row 2
-col = 1
-while col <= len(sim_cols):
-    band = sim_cols[col - 1][3]
-    end = col
-    while end + 1 <= len(sim_cols) and sim_cols[end][3] == band:
-        end += 1
-    s.merge_cells(start_row=1, start_column=col, end_row=1, end_column=end)
-    c = s.cell(row=1, column=col, value=band_names[band])
-    c.fill = PatternFill("solid", fgColor=BAND[band]); c.font = WHITE_B
-    c.alignment = Alignment(horizontal="center")
-    for k in range(col, end + 1):
-        s.cell(row=1, column=k).fill = PatternFill("solid", fgColor=BAND[band])
-    col = end + 1
-for i, (k, head, w, band, kind, com) in enumerate(sim_cols, start=1):
-    c = s.cell(row=2, column=i, value=head)
+for sidx in range(1, MAX_SPECIES + 1):
+    for k, hd, w, kind in SP_FIELDS:
+        add(f"s{sidx}_{k}", hd, w, f"sp{sidx}", f"Species {sidx}", kind,
+            "Brightness 0 = no dye of this colour" if k == "b1" and sidx == 1 else None)
+for k, hd, w, com in (("nsp", "Species used", 8, None), ("ntot", "Total molecules", 9, None),
+                      ("r1", "Exp. rate ch1 [kHz]", 9, None), ("r2", "Exp. rate ch2 [kHz]", 9, None),
+                      ("r3", "Exp. rate ch3 [kHz]", 9, None), ("ph", "Photons per file [M]", 9, None),
+                      ("mem", "Memory per file [GB]", 9, None), ("check", "Check", 40, None)):
+    add(k, hd, w, "chk", "Totals and checks (automatic)", "calc", com)
+add("nfiles", "Number of files", 8, "out", "Output")
+add("seed", "Seed", 8, "out", "Output", comment="Empty = random")
+add("fmt", "Format", 7, "out", "Output")
+for k, hd, w in (("date", "Date run", 10), ("runtime", "Run time [min]", 8), ("fitD", "Fitted D [µm²/s]", 9),
+                 ("fitc", "Fitted c [nM]", 9), ("notes", "Result notes", 36)):
+    add(k, hd, w, "res", "Results")
+
+C = {c[0]: L(i + 1) for i, c in enumerate(cols)}
+
+# ---- band row (1), sub-band row (2: species titles are in row 1 already), header row (3)
+i = 0
+while i < len(cols):
+    band, title = cols[i][3], cols[i][4]
+    j = i
+    while j + 1 < len(cols) and cols[j + 1][3] == band:
+        j += 1
+    color = SP_BAND[(int(band[2:]) - 1) % len(SP_BAND)] if band.startswith("sp") else BAND[band]
+    s.merge_cells(start_row=1, start_column=i + 1, end_row=2, end_column=j + 1)
+    c = s.cell(row=1, column=i + 1, value=title)
+    c.font = Font(name=F, size=11, bold=True, color="FFFFFF")
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    for k in range(i + 1, j + 2):
+        for rr in (1, 2):
+            s.cell(row=rr, column=k).fill = PatternFill("solid", fgColor=color)
+    if band.startswith("sp"):  # outline group so species blocks can be folded
+        s.column_dimensions.group(L(i + 1), L(j + 1), outline_level=1, hidden=False)
+    i = j + 1
+for idx, (k, hd, w, band, title, kind, com) in enumerate(cols, start=1):
+    c = s.cell(row=3, column=idx, value=hd)
     c.fill = HDR; c.font = WHITE_B; c.border = BOX
     c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     if com:
         c.comment = Comment(com, "PAMsim planner")
-    s.column_dimensions[L(i)].width = w
-s.row_dimensions[2].height = 42
-s.freeze_panes = "C3"
+    s.column_dimensions[L(idx)].width = w
+s.row_dimensions[3].height = 40
+s.freeze_panes = f"{C['purpose']}{FIRST}"
+s.sheet_properties.outlinePr.summaryRight = False
 
-SP_FIRST, SP_LAST = 3, 3 + N_ROWS_SP - 1
-def sp(col):  # absolute species range
-    return f"Species!${col}${SP_FIRST}:${col}${SP_LAST}"
+# ====================================================================== hidden calculation sheet
+calc = wb.create_sheet("Calc")
+calc["A1"] = "Per-species helper values for the Simulations sheet (do not edit)"
+CC = {}
+cc = 2
+for sidx in range(1, MAX_SPECIES + 1):
+    for k in ("rate1", "rate2", "rate3", "maxb", "step", "used"):
+        CC[(sidx, k)] = L(cc)
+        calc.cell(row=3, column=cc, value=f"S{sidx} {k}")
+        cc += 1
 
-FIRST, LAST = 3, 3 + N_ROWS_SIM - 1
+# ====================================================================== formulas
 for r in range(FIRST, LAST + 1):
-    for i, (k, head, w, band, kind, com) in enumerate(sim_cols, start=1):
-        c = s.cell(row=r, column=i)
+    for idx, (k, hd, w, band, title, kind, com) in enumerate(cols, start=1):
+        c = s.cell(row=r, column=idx)
         c.border = BOX
-        if kind == "in":
-            c.fill = INPUT; c.font = BLUE
-        else:
-            c.fill = CALC; c.font = BLACK
-        c.alignment = Alignment(vertical="top", wrap_text=(k in ("purpose", "check", "notes", "folder")))
-    idc = f"$A{r}"
-    g = lambda k: f"${SC[k]}{r}"
-    s[f"{SC['nsp']}{r}"] = f'=IF({idc}="","",COUNTIF({sp("A")},{idc}))'
-    s[f"{SC['ntot']}{r}"] = f'=IF({idc}="","",SUMIF({sp("A")},{idc},{sp("D")}))'
-    for ch, spcol in zip(("r1", "r2", "r3", "r4"), ("Q", "R", "S", "T")):
-        s[f"{SC[ch]}{r}"] = f'=IF({idc}="","",SUMIF({sp("A")},{idc},{sp(spcol)}))'
-        s[f"{SC[ch]}{r}"].number_format = '0.0;-0.0;"-"'
-    s[f"{SC['ph']}{r}"] = (f'=IF({idc}="","",(SUM({g("r1")}:{g("r4")})+IF({g("bg")}="Yes",{g("bgk")}*{g("ncol")},0))'
-                          f'*1000*{g("dur")}/1000000)')
-    s[f"{SC['ph']}{r}"].number_format = "0.00"
-    s[f"{SC['mem']}{r}"] = f'=IF({idc}="","",{g("ph")}*1000000*12/1000000000)'
-    s[f"{SC['mem']}{r}"].number_format = "0.000"
-    s[f"{SC['step']}{r}"] = f'=IF(OR({idc}="",{g("nsp")}=0),"",_xlfn.MAXIFS({sp("U")},{sp("A")},{idc}))'
-    s[f"{SC['step']}{r}"].number_format = "0.000"
-    nsat = f'COUNTIFS({sp("A")},{idc},{sp("V")},"✖*")'
-    nwarn = f'COUNTIFS({sp("A")},{idc},{sp("V")},"⚠*")'
-    s[f"{SC['check']}{r}"] = (
-        f'=IF({idc}="","",IF({g("nsp")}=0,"⚠ no species on the Species sheet",'
-        f'IF({nsat}>0,"✖ "&{nsat}&" species saturated (brightness >= frequency) - see Species sheet",'
-        f'IF(MIN({g("bx")},{g("by")})<8*{g("wr")},"⚠ box too small laterally (< 8·wr)",'
-        f'IF(AND({g("bz")}>0,{g("bz")}<3*{g("wz")}),"⚠ box too small axially (< 3·wz)",'
-        f'IF({g("mem")}>8,"⚠ more than 8 GB per file: shorten the duration and use several files",'
-        f'IF({nwarn}>0,"⚠ "&{nwarn}&" species with a warning - see Species sheet","✔ OK")))))))')
-
-# validations
-dv = lambda f: DataValidation(type="list", formula1=f, allow_blank=True)
-for key, ref in (("status", "Lists!$A$2:$A$7"), ("scan", "Lists!$B$2:$B$5"), ("bg", "Lists!$C$2:$C$3"),
-                 ("irf", "Lists!$C$2:$C$3"), ("fmt", "Lists!$E$2:$E$4")):
-    v = dv(ref); s.add_data_validation(v); v.add(f"{SC[key]}{FIRST}:{SC[key]}{LAST}")
-vn = DataValidation(type="whole", operator="between", formula1="1", formula2="4", allow_blank=True)
-vn.error = "Colours must be 1-4"; s.add_data_validation(vn); vn.add(f"{SC['ncol']}{FIRST}:{SC['ncol']}{LAST}")
-vp = DataValidation(type="decimal", operator="greaterThan", formula1="0", allow_blank=True)
-vp.error = "Must be > 0"; s.add_data_validation(vp)
-for key in ("freq", "dur", "wr", "wz", "bx", "by"):
-    vp.add(f"{SC[key]}{FIRST}:{SC[key]}{LAST}")
-# conditional colours of the check column
-rng = f"{SC['check']}{FIRST}:{SC['check']}{LAST}"
-cc = SC["check"]
-s.conditional_formatting.add(rng, FormulaRule(formula=[f'LEFT(${cc}{FIRST},1)="✖"'], fill=PatternFill("solid", fgColor="F8D3D3"), font=Font(name=F, color="9C1C1C", bold=True)))
-s.conditional_formatting.add(rng, FormulaRule(formula=[f'LEFT(${cc}{FIRST},1)="⚠"'], fill=PatternFill("solid", fgColor="FCE6C4"), font=Font(name=F, color="8A4B00")))
-s.conditional_formatting.add(rng, FormulaRule(formula=[f'LEFT(${cc}{FIRST},1)="✔"'], fill=PatternFill("solid", fgColor="D5EFD5"), font=Font(name=F, color="1E6B1E")))
-st = SC["status"]
-for val, colr in (("Done", "D5EFD5"), ("Analysed", "BFE3C6"), ("Running", "D6E6FA"), ("Discarded", "E3E3E3")):
-    s.conditional_formatting.add(f"{st}{FIRST}:{st}{LAST}", FormulaRule(formula=[f'${st}{FIRST}="{val}"'], fill=PatternFill("solid", fgColor=colr)))
-s.auto_filter.ref = f"A2:{L(len(sim_cols))}{LAST}"
-
-# ------------------------------------------------------------------ Species
-p = wb.create_sheet("Species")
-sp_cols = [
-    ("A", "Sim ID", 8, "in"), ("B", "Species name", 20, "in"), ("C", "D [µm²/s]", 9, "in"),
-    ("D", "Molecules N", 10, "in"), ("E", "Brightness 1 [kHz]", 10, "in"), ("F", "Brightness 2 [kHz]", 10, "in"),
-    ("G", "Brightness 3 [kHz]", 10, "in"), ("H", "Brightness 4 [kHz]", 10, "in"),
-    ("I", "Lifetime 1 [ns]", 8, "in"), ("J", "Lifetime 2 [ns]", 8, "in"), ("K", "Lifetime 3 [ns]", 8, "in"),
-    ("L", "Lifetime 4 [ns]", 8, "in"), ("M", "FRET", 11, "in"), ("N", "Notes", 30, "in"),
-    ("O", "Conc. [nM]", 9, "calc"), ("P", "Max brightness / freq.", 10, "calc"),
-    ("Q", "Exp. rate ch1 [kHz]", 10, "calc"), ("R", "Exp. rate ch2 [kHz]", 10, "calc"),
-    ("S", "Exp. rate ch3 [kHz]", 10, "calc"), ("T", "Exp. rate ch4 [kHz]", 10, "calc"),
-    ("U", "Diff. step / wr", 9, "calc"), ("V", "Check", 46, "calc"),
-]
-bands = [(1, 2, "Link", "id"), (3, 4, "Molecule", "gen"), (5, 8, "Brightness per colour (0 = no dye)", "foc"),
-         (9, 12, "Lifetime per colour", "out"), (13, 14, "Other", "gen"), (15, 22, "Automatic estimates and checks", "chk")]
-for a, b, name, band in bands:
-    p.merge_cells(start_row=1, start_column=a, end_row=1, end_column=b)
-    c = p.cell(row=1, column=a, value=name); c.font = WHITE_B; c.alignment = Alignment(horizontal="center")
-    for k in range(a, b + 1):
-        p.cell(row=1, column=k).fill = PatternFill("solid", fgColor=BAND[band])
-for i, (cl, head, w, kind) in enumerate(sp_cols, start=1):
-    c = p.cell(row=2, column=i, value=head)
-    c.fill = HDR; c.font = WHITE_B; c.border = BOX
-    c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    p.column_dimensions[cl].width = w
-p.row_dimensions[2].height = 42
-p.freeze_panes = "C3"
-p["P2"].comment = Comment("Largest brightness of this species divided by the sampling frequency. Keep < 10 %.", "PAMsim planner")
-p["Q2"].comment = Comment("Gaussian focus: c · brightness · (π/2)^1.5 · wr² · wz. If brightness >= frequency the saturated focus is integrated exactly (same model as the PAMsim Check panel). FRET and crosstalk are ignored.", "PAMsim planner")
-p["U2"].comment = Comment("sqrt(2·D·dt) / wr with dt = 1/sampling frequency. Keep < 0.1.", "PAMsim planner")
-
-simrng = lambda key: f"Simulations!${SC[key]}${FIRST}:${SC[key]}${LAST}"
-look = lambda key, r: f"INDEX({simrng(key)},MATCH($A{r},Simulations!$A${FIRST}:$A${LAST},0))"
-for r in range(SP_FIRST, SP_LAST + 1):
-    for i, (cl, head, w, kind) in enumerate(sp_cols, start=1):
-        c = p.cell(row=r, column=i); c.border = BOX
         c.fill = INPUT if kind == "in" else CALC
         c.font = BLUE if kind == "in" else BLACK
-        c.alignment = Alignment(vertical="top", wrap_text=(cl in ("N", "V")))
-    ok = f'OR($A{r}="",ISNA(MATCH($A{r},Simulations!$A${FIRST}:$A${LAST},0)))'
-    vol = f'({look("bx", r)}*{look("by", r)}*IF({look("bz", r)}>0,{look("bz", r)},1))'
-    freq = look("freq", r); wr = look("wr", r); wz = look("wz", r); bz = look("bz", r)
-    p[f"O{r}"] = f'=IF({ok},"",IF({bz}>0,$D{r}/{vol}/1E-24/6.022E+23/1E-9,""))'
-    p[f"O{r}"].number_format = "0.000"
-    p[f"P{r}"] = f'=IF({ok},"",MAX($E{r}:$H{r})/{freq})'
-    p[f"P{r}"].number_format = "0.0%"
-    prof = f'(PI()/2*{wr}^2*IF({bz}>0,SQRT(PI()/2)*{wz},1))'
-    for out, bcol in zip("QRST", "EFGH"):
-        # saturated focus: integral of min(1, p*exp(-u)) over the focus, u0 = ln(p), p = brightness/frequency
-        u0 = f"LN(${bcol}{r}/{freq})"
-        sat3 = (f"2*PI()*{wr}^2*{wz}/2^1.5*(2/3*{u0}^1.5+SQRT({u0})"
-                f"+${bcol}{r}/{freq}*SQRT(PI())/2*ERFC(SQRT({u0})))")
-        sat2 = f"PI()*{wr}^2/2*({u0}+1)"
-        p[f"{out}{r}"] = (f'=IF({ok},"",IF(N(${bcol}{r})<=0,0,IF(${bcol}{r}<{freq},'
-                          f'$D{r}/{vol}*${bcol}{r}*{prof},'
-                          f'$D{r}/{vol}*{freq}*IF({bz}>0,{sat3},{sat2}))))')
-        p[f"{out}{r}"].number_format = '0.0;-0.0;"-"'
-    p[f"U{r}"] = f'=IF(OR({ok},N($C{r})<=0),"",SQRT(2*$C{r}*1000000/({freq}*1000))/{wr})'
-    p[f"U{r}"].number_format = "0.000"
-    p[f"V{r}"] = (f'=IF($A{r}="","",IF(ISNA(MATCH($A{r},Simulations!$A${FIRST}:$A${LAST},0)),"✖ Sim ID not found on the Simulations sheet",'
-                  f'IF($P{r}>=1,"✖ brightness >= sampling frequency: completely saturated (D too small, c too large)",'
-                  f'IF($P{r}>0.1,"⚠ brightness > 10% of the sampling frequency: focus starts to saturate",'
-                  f'IF(N($U{r})>0.1,"⚠ diffusion step > 10% of wr: raise the sampling frequency",'
-                  f'IF(MAX($E{r}:$H{r})=0,"⚠ no brightness set","✔ OK"))))))')
-vid = DataValidation(type="list", formula1=f"=Simulations!$A${FIRST}:$A${LAST}", allow_blank=True)
-p.add_data_validation(vid); vid.add(f"A{SP_FIRST}:A{SP_LAST}")
-vf = DataValidation(type="list", formula1="Lists!$D$2:$D$4", allow_blank=True)
-p.add_data_validation(vf); vf.add(f"M{SP_FIRST}:M{SP_LAST}")
-vpos = DataValidation(type="decimal", operator="greaterThanOrEqual", formula1="0", allow_blank=True)
-vpos.error = "Must be >= 0"; p.add_data_validation(vpos); vpos.add(f"C{SP_FIRST}:L{SP_LAST}")
-rngv = f"V{SP_FIRST}:V{SP_LAST}"
-p.conditional_formatting.add(rngv, FormulaRule(formula=[f'LEFT($V{SP_FIRST},1)="✖"'], fill=PatternFill("solid", fgColor="F8D3D3"), font=Font(name=F, color="9C1C1C", bold=True)))
-p.conditional_formatting.add(rngv, FormulaRule(formula=[f'LEFT($V{SP_FIRST},1)="⚠"'], fill=PatternFill("solid", fgColor="FCE6C4"), font=Font(name=F, color="8A4B00")))
-p.conditional_formatting.add(rngv, FormulaRule(formula=[f'LEFT($V{SP_FIRST},1)="✔"'], fill=PatternFill("solid", fgColor="D5EFD5"), font=Font(name=F, color="1E6B1E")))
-p.conditional_formatting.add(f"P{SP_FIRST}:P{SP_LAST}", FormulaRule(formula=[f'AND(ISNUMBER($P{SP_FIRST}),$P{SP_FIRST}>=1)'], fill=PatternFill("solid", fgColor="F8D3D3")))
-p.conditional_formatting.add(f"P{SP_FIRST}:P{SP_LAST}", FormulaRule(formula=[f'AND(ISNUMBER($P{SP_FIRST}),$P{SP_FIRST}>0.1,$P{SP_FIRST}<1)'], fill=PatternFill("solid", fgColor="FCE6C4")))
-p.auto_filter.ref = f"A2:V{SP_LAST}"
+        c.alignment = Alignment(vertical="top", wrap_text=k in ("purpose", "check", "notes", "folder"))
+    S = lambda k: f"Simulations!${C[k]}{r}"  # noqa: E731
+    g = lambda k: f"${C[k]}{r}"  # noqa: E731
+    ida = g("id")
+    vol = f"({S('bx')}*{S('by')}*IF({S('bz')}>0,{S('bz')},1))"
+    prof = f"(PI()/2*{S('wr')}^2*IF({S('bz')}>0,SQRT(PI()/2)*{S('wz')},1))"
+    for sidx in range(1, MAX_SPECIES + 1):
+        sk = lambda k: f"s{sidx}_{k}"  # noqa: E731
+        Nn, Dd = S(sk("N")), S(sk("D"))
+        used = f"AND({S('id')}<>\"\",OR({S(sk('nm'))}<>\"\",N({Nn})>0))"
+        calc[f"{CC[(sidx, 'used')]}{r}"] = f"=IF({used},1,0)"
+        for ch in (1, 2, 3):
+            B = S(sk(f"b{ch}"))
+            u0 = f"LN({B}/{S('freq')})"
+            sat3 = (f"2*PI()*{S('wr')}^2*{S('wz')}/2^1.5*(2/3*{u0}^1.5+SQRT({u0})"
+                    f"+{B}/{S('freq')}*SQRT(PI())/2*ERFC(SQRT({u0})))")
+            sat2 = f"PI()*{S('wr')}^2/2*({u0}+1)"
+            calc[f"{CC[(sidx, f'rate{ch}')]}{r}"] = (
+                f"=IF(OR(NOT({used}),N({B})<=0,N({Nn})<=0,{ch}>N({S('ncol')})),0,"
+                f"IF({B}<{S('freq')},{Nn}/{vol}*{B}*{prof},{Nn}/{vol}*{S('freq')}*IF({S('bz')}>0,{sat3},{sat2})))")
+        calc[f"{CC[(sidx, 'maxb')]}{r}"] = (f"=IF(NOT({used}),0,MAX(N({S(sk('b1'))}),N({S(sk('b2'))}),N({S(sk('b3'))}))"
+                                           f"/{S('freq')})")
+        calc[f"{CC[(sidx, 'step')]}{r}"] = (f"=IF(OR(NOT({used}),N({Dd})<=0),0,"
+                                           f"SQRT(2*{Dd}*1000000/({S('freq')}*1000))/{S('wr')})")
+        # FRET efficiencies (visible)
+        for pair, r0 in (("12", "r012"), ("13", "r013"), ("23", "r023")):
+            R = g(sk(f"R{pair}"))
+            s[f"{C[sk(f'E{pair}')]}{r}"] = (f'=IF(OR({g(sk("fret"))}="",{g(sk("fret"))}="No FRET",N({R})<=0,N({g(r0)})<=0),"",'
+                                            f'1/(1+({R}/{g(r0)})^6))')
+            s[f"{C[sk(f'E{pair}')]}{r}"].number_format = "0.00"
+        # concentration
+        s[f"{C[sk('c')]}{r}"] = (f'=IF(OR({ida}="",N({g(sk("N"))})<=0),"",IF({g("bz")}>0,'
+                                 f'{g(sk("N"))}/({g("bx")}*{g("by")}*{g("bz")})/1E-24/6.022E+23/1E-9,""))')
+        s[f"{C[sk('c')]}{r}"].number_format = "0.000"
+        mx = f"Calc!{CC[(sidx, 'maxb')]}{r}"
+        stp = f"Calc!{CC[(sidx, 'step')]}{r}"
+        fr = g(sk("fret"))
+        s[f"{C[sk('chk')]}{r}"] = (
+            f'=IF(Calc!{CC[(sidx, "used")]}{r}=0,"",'
+            f'IF({mx}>=1,"✖ saturated (B ≥ freq.)",'
+            f'IF({mx}>0.1,"⚠ B > 10% of freq.",'
+            f'IF({mx}=0,"⚠ no brightness",'
+            f'IF({stp}>0.1,"⚠ step > 10% of wr",'
+            f'IF(AND({fr}<>"",{fr}<>"No FRET",N({g("ncol")})<2),"⚠ FRET needs ≥ 2 colours",'
+            f'IF(AND({fr}<>"",{fr}<>"No FRET",N({g(sk("R12"))})+N({g(sk("R13"))})+N({g(sk("R23"))})=0),"⚠ FRET: set R",'
+            f'"✔ OK")))))))')
+    # totals
+    used_cells = ",".join(f"Calc!{CC[(i, 'used')]}{r}" for i in range(1, MAX_SPECIES + 1))
+    s[f"{C['nsp']}{r}"] = f'=IF({ida}="","",SUM({used_cells}))'
+    s[f"{C['ntot']}{r}"] = f'=IF({ida}="","",' + "+".join(f"N({g(f's{i}_N')})" for i in range(1, MAX_SPECIES + 1)) + ")"
+    for ch in (1, 2, 3):
+        cells = ",".join(f"Calc!{CC[(i, f'rate{ch}')]}{r}" for i in range(1, MAX_SPECIES + 1))
+        s[f"{C[f'r{ch}']}{r}"] = f'=IF({ida}="","",SUM({cells}))'
+        s[f"{C[f'r{ch}']}{r}"].number_format = '0.0;-0.0;"-"'
+    s[f"{C['ph']}{r}"] = (f'=IF({ida}="","",({g("r1")}+{g("r2")}+{g("r3")}+IF({g("bg")}="Yes",N({g("bgk")})*N({g("ncol")}),0))'
+                          f'*1000*{g("dur")}/1000000)')
+    s[f"{C['ph']}{r}"].number_format = "0.00"
+    s[f"{C['mem']}{r}"] = f'=IF({ida}="","",{g("ph")}*1000000*12/1000000000)'
+    s[f"{C['mem']}{r}"].number_format = "0.000"
+    chks = [g(f"s{i}_chk") for i in range(1, MAX_SPECIES + 1)]
+    nred = "+".join(f'(LEFT({c},1)="✖")' for c in chks)
+    nor = "+".join(f'(LEFT({c},1)="⚠")' for c in chks)
+    s[f"{C['check']}{r}"] = (
+        f'=IF({ida}="","",IF({g("nsp")}=0,"⚠ no species entered",'
+        f'IF(({nred})>0,"✖ "&({nred})&" species saturated - see the species checks",'
+        f'IF(MIN({g("bx")},{g("by")})<8*{g("wr")},"⚠ box too small laterally (< 8·wr)",'
+        f'IF(AND({g("bz")}>0,{g("bz")}<3*{g("wz")}),"⚠ box too small axially (< 3·wz)",'
+        f'IF({g("mem")}>8,"⚠ > 8 GB per file: shorten the duration and use several files",'
+        f'IF(({nor})>0,"⚠ "&({nor})&" species with a warning","✔ OK")))))))')
+calc.sheet_state = "hidden"
 
-# ------------------------------------------------------------------ data
+# ====================================================================== validation and formatting
+def dv(ref, cells):
+    v = DataValidation(type="list", formula1=ref, allow_blank=True)
+    s.add_data_validation(v)
+    for c in cells:
+        v.add(c)
+
+
+rng = lambda k: f"{C[k]}{FIRST}:{C[k]}{LAST}"  # noqa: E731
+dv("Lists!$A$2:$A$7", [rng("status")])
+dv("Lists!$B$2:$B$5", [rng("scan")])
+dv("Lists!$C$2:$C$3", [rng("bg"), rng("irf")])
+dv("Lists!$E$2:$E$4", [rng("fmt")])
+dv("Lists!$D$2:$D$4", [rng(f"s{i}_fret") for i in range(1, MAX_SPECIES + 1)])
+vcol = DataValidation(type="whole", operator="between", formula1="1", formula2="3", allow_blank=True)
+vcol.error = "This planner handles 1-3 colours"; s.add_data_validation(vcol); vcol.add(rng("ncol"))
+vpos = DataValidation(type="decimal", operator="greaterThanOrEqual", formula1="0", allow_blank=True)
+vpos.error = "Must be >= 0"; s.add_data_validation(vpos)
+for i in range(1, MAX_SPECIES + 1):
+    for k in ("D", "N", "b1", "b2", "b3", "t1", "t2", "t3", "R12", "R13", "R23"):
+        vpos.add(rng(f"s{i}_{k}"))
+
+
+def traffic(col_range, first_cell):
+    s.conditional_formatting.add(col_range, FormulaRule(formula=[f'LEFT({first_cell},1)="✖"'], fill=RED,
+                                                        font=Font(name=F, color="9C1C1C", bold=True)))
+    s.conditional_formatting.add(col_range, FormulaRule(formula=[f'LEFT({first_cell},1)="⚠"'], fill=ORANGE,
+                                                        font=Font(name=F, color="8A4B00")))
+    s.conditional_formatting.add(col_range, FormulaRule(formula=[f'LEFT({first_cell},1)="✔"'], fill=GREEN,
+                                                        font=Font(name=F, color="1E6B1E")))
+
+
+traffic(rng("check"), f"${C['check']}{FIRST}")
+for i in range(1, MAX_SPECIES + 1):
+    traffic(rng(f"s{i}_chk"), f"${C[f's{i}_chk']}{FIRST}")
+st = C["status"]
+for val, colr in (("Done", "D5EFD5"), ("Analysed", "BFE3C6"), ("Running", "D6E6FA"), ("Discarded", "E3E3E3")):
+    s.conditional_formatting.add(rng("status"), FormulaRule(formula=[f'${st}{FIRST}="{val}"'],
+                                                            fill=PatternFill("solid", fgColor=colr)))
+s.auto_filter.ref = f"A3:{L(len(cols))}{LAST}"
+
+# ====================================================================== pre-filled rows
 base = "/Fablab 4/Users/Fabio/PhD/Projects/3C_FCCS/Simulation"
+cpx = base + "/Complex"
+lt3, cx = [4, 3, 2], [4, 3, 2.5]
 sims = [
-    ("S00", "example_3C_realistic", "EXAMPLE: realistic 3-colour FCCS (brightness < 10% of the frequency)", base, "Idea", 1, 60, [("triple complex", 35, 1000, [100, 70, 50], [4, 3, 2])], 60),
-    ("S01", "Simulation_800N_15D_200wr_1000wz_60s_60ns", "Just to see if the code works", base, "Planned", 2, 60, [("Species 1", 15, 800, [50, 50, 50], [4, 3, 2])], 60),
-    ("S02", "Simulation_100Nx3_200wr_1000wz_60s_60ns_3colorXspecies", "To verify that no 3C cross-correlation would arise", base, "Planned", 2, 60,
-     [("Species 1", 50, 800, [50, 50, 0], [4, 3, 2]), ("Species 2", 50, 100, [50, 0, 50], [4, 3, 2]), ("Species 3", 50, 100, [0, 50, 50], [4, 3, 2])], 60),
+    ("S00", "example_3C_realistic", "EXAMPLE: realistic 3-colour FCCS mixture incl. a static FRET pair (brightness < 10% of freq.)",
+     base, "Idea", 1, 60, [("triple complex", 35, 300, [100, 70, 50], lt3, None),
+                           ("blue-green", 35, 200, [100, 70, 0], lt3, None),
+                           ("green-red", 35, 200, [0, 70, 50], lt3, None),
+                           ("FRET pair 1-2", 50, 100, [100, 70, 0], lt3, ("Static FRET", 50, None, None))]),
+    ("S01", "Simulation_800N_15D_200wr_1000wz_60s_60ns", "Just to see if the code works", base, "Planned", 2, 60,
+     [("Species 1", 15, 800, [50, 50, 50], lt3, None)]),
+    ("S02", "Simulation_100Nx3_200wr_1000wz_60s_60ns_3colorXspecies", "To verify that no 3C cross-correlation would arise",
+     base, "Planned", 2, 60, [("Species 1", 50, 800, [50, 50, 0], lt3, None), ("Species 2", 50, 100, [50, 0, 50], lt3, None),
+                              ("Species 3", 50, 100, [0, 50, 50], lt3, None)]),
+    ("S03", "Simulation_complexes_1st_10N_200wr_1000wz_10s_60ns_1000kHz", "To test the code in a crowded environment", cpx,
+     "Planned", 3, 10, [("Species 1", 400, 10, [1e4, 0, 0], cx, None), ("Species 2", 400, 10, [0, 1e4, 0], cx, None),
+                        ("Species 3", 400, 10, [0, 0, 1e4], cx, None), ("Species 4", 33, 10, [1e4, 1e4, 1e4], cx, None),
+                        ("Species 5", 35, 10, [1e4, 1e4, 0], cx, None), ("Species 6", 33, 10, [2e4, 1e4, 0], cx, None)]),
+    ("S04", "Simulation_complexes_2nd_10N_200wr_1000wz_10s_60ns_1000kHz", "To test the code in a crowded environment", cpx,
+     "Planned", 3, 10, [("Species 1", 400, 10, [1e4, 0, 0], cx, None), ("Species 2", 400, 10, [0, 7e3, 0], cx, None),
+                        ("Species 3", 400, 10, [0, 0, 5e3], cx, None), ("Species 4", 33, 10, [1e4, 7e3, 5e3], cx, None),
+                        ("Species 5", 33, 10, [2e4, 7e3, 0], cx, None)]),
+    ("S05", "Simulation_complexes_3rd_10N_200wr_1000wz_10s_60ns_1000kHz",
+     "To test whether the code would give rise to a 3C cross-correlation when wrong", cpx, "Planned", 3, 10,
+     [("Species 1", 400, 10, [1e4, 0, 0], cx, None), ("Species 2", 400, 10, [0, 7e3, 0], cx, None),
+      ("Species 3", 400, 10, [0, 0, 5e3], cx, None), ("Species 4", 33, 10, [2e4, 7e3, 0], cx, None),
+      ("Species 5", 33, 10, [1e4, 7e3, 5e3], cx, None)]),
+    ("S06", "Simulation_complexes_4th_10N_200wr_1000wz_10s_60ns_1000kHz",
+     "To test whether the code would give rise to a 3C cross-correlation when wrong", cpx, "Planned", 3, 10,
+     [("Species 1", 400, 10, [1e4, 0, 0], cx, None), ("Species 2", 400, 10, [0, 7e3, 0], cx, None),
+      ("Species 3", 400, 10, [0, 0, 5e3], cx, None), ("Species 4", 33, 10, [2e4, 7e3, 0], cx, None),
+      ("Species 5", 33, 10, [1e4, 0, 5e3], cx, None), ("Species 6", 33, 10, [0, 7e3, 1e4], cx, None)]),
+    ("S07", "Crazy", "What happens to 3C if the environment is very crowded", cpx, "Planned", 3, 30,
+     [("Species 1", 35, 100, [1e3, 700, 500], lt3, None), ("Species 2", 35, 1000, [1e3, 0, 500], lt3, None),
+      ("Species 3", 35, 500, [1e3, 700, 0], lt3, None)]),
+    ("S08", "Crazy_2", "you need to shorten the lag time", cpx, "Planned", 3, 30,
+     [("Species 1", 35, 100, [1e3, 700, 500], lt3, None), ("Species 2", 35, 1000, [1e3, 0, 500], lt3, None),
+      ("Species 3", 35, 2000, [2e3, 700, 0], lt3, None)]),
+    ("S09", "Crazy_3", "", cpx, "Planned", 3, 30,
+     [("Species 1", 35, 10, [1e3, 700, 500], lt3, None), ("Species 2", 35, 10, [1e3, 0, 500], lt3, None),
+      ("Species 3", 35, 10, [2e3, 700, 0], lt3, None)]),
+    ("S10", "Crazy_4", "", cpx, "Planned", 3, 5,
+     [("Species 1", 35, 1000, [1e3, 700, 500], lt3, None), ("Species 2", 35, 1000, [1e3, 0, 500], lt3, None),
+      ("Species 3", 35, 1000, [2e3, 700, 0], lt3, None)]),
+    ("S11", "Crazy_2_checkup_final", "longer simulation with same concept as crazy_2 but better statistics", cpx + "/Crazy_2",
+     "Planned", 3, 150, [("Species 1", 35, 200, [1e4, 7e3, 5e3], lt3, None), ("Species 2", 35, 2000, [1e4, 0, 5e3], lt3, None),
+                         ("Species 3", 35, 4000, [2e4, 7e3, 0], lt3, None)]),
 ]
-C = base + "/Complex"
-cx = [4, 3, 2.5]
-sims += [
-    ("S03", "Simulation_complexes_1st_10N_200wr_1000wz_10s_60ns_1000kHz", "To test the code in a crowded environment", C, "Planned", 3, 10,
-     [("Species 1", 400, 10, [1e4, 0, 0], cx), ("Species 2", 400, 10, [0, 1e4, 0], cx), ("Species 3", 400, 10, [0, 0, 1e4], cx),
-      ("Species 4", 33, 10, [1e4, 1e4, 1e4], cx), ("Species 5", 35, 10, [1e4, 1e4, 0], cx), ("Species 6", 33, 10, [2e4, 1e4, 0], cx)], 60),
-    ("S04", "Simulation_complexes_2nd_10N_200wr_1000wz_10s_60ns_1000kHz", "To test the code in a crowded environment", C, "Planned", 3, 10,
-     [("Species 1", 400, 10, [1e4, 0, 0], cx), ("Species 2", 400, 10, [0, 7e3, 0], cx), ("Species 3", 400, 10, [0, 0, 5e3], cx),
-      ("Species 4", 33, 10, [1e4, 7e3, 5e3], cx), ("Species 5", 33, 10, [2e4, 7e3, 0], cx)], 60),
-    ("S05", "Simulation_complexes_3rd_10N_200wr_1000wz_10s_60ns_1000kHz", "To test whether the code would give rise to a 3C cross-correlation when wrong", C, "Planned", 3, 10,
-     [("Species 1", 400, 10, [1e4, 0, 0], cx), ("Species 2", 400, 10, [0, 7e3, 0], cx), ("Species 3", 400, 10, [0, 0, 5e3], cx),
-      ("Species 4", 33, 10, [2e4, 7e3, 0], cx), ("Species 5", 33, 10, [1e4, 7e3, 5e3], cx)], 60),
-    ("S06", "Simulation_complexes_4th_10N_200wr_1000wz_10s_60ns_1000kHz", "To test whether the code would give rise to a 3C cross-correlation when wrong", C, "Planned", 3, 10,
-     [("Species 1", 400, 10, [1e4, 0, 0], cx), ("Species 2", 400, 10, [0, 7e3, 0], cx), ("Species 3", 400, 10, [0, 0, 5e3], cx),
-      ("Species 4", 33, 10, [2e4, 7e3, 0], cx), ("Species 5", 33, 10, [1e4, 0, 5e3], cx), ("Species 6", 33, 10, [0, 7e3, 1e4], cx)], 60),
-    ("S07", "Crazy", "What happens to 3C if the environment is very crowded", C, "Planned", 3, 30,
-     [("Species 1", 35, 100, [1e3, 700, 500], [4, 3, 2]), ("Species 2", 35, 1000, [1e3, 0, 500], [4, 3, 2]), ("Species 3", 35, 500, [1e3, 700, 0], [4, 3, 2])], 60),
-    ("S08", "Crazy_2", "you need to shorten the lag time", C, "Planned", 3, 30,
-     [("Species 1", 35, 100, [1e3, 700, 500], [4, 3, 2]), ("Species 2", 35, 1000, [1e3, 0, 500], [4, 3, 2]), ("Species 3", 35, 2000, [2e3, 700, 0], [4, 3, 2])], 60),
-    ("S09", "Crazy_3", "", C, "Planned", 3, 30,
-     [("Species 1", 35, 10, [1e3, 700, 500], [4, 3, 2]), ("Species 2", 35, 10, [1e3, 0, 500], [4, 3, 2]), ("Species 3", 35, 10, [2e3, 700, 0], [4, 3, 2])], 60),
-    ("S10", "Crazy_4", "", C, "Planned", 3, 5,
-     [("Species 1", 35, 1000, [1e3, 700, 500], [4, 3, 2]), ("Species 2", 35, 1000, [1e3, 0, 500], [4, 3, 2]), ("Species 3", 35, 1000, [2e3, 700, 0], [4, 3, 2])], 60),
-    ("S11", "Crazy_2_checkup_final", "longer simulation with same concept as crazy_2 but better statistics", C + "/Crazy_2", "Planned", 3, 150,
-     [("Species 1", 35, 200, [1e4, 7e3, 5e3], [4, 3, 2]), ("Species 2", 35, 2000, [1e4, 0, 5e3], [4, 3, 2]), ("Species 3", 35, 4000, [2e4, 7e3, 0], [4, 3, 2])], 60),
-]
-row_sp = SP_FIRST
-for k, (sid, name, purpose, folder, status, prio, dur, species, mir) in enumerate(sims):
+for k, (sid, name, purpose, folder, status, prio, dur, species) in enumerate(sims):
     r = FIRST + k
     vals = {"id": sid, "name": name, "purpose": purpose, "folder": folder, "status": status, "prio": prio,
-            "bx": 5000, "by": 5000, "bz": 5000, "freq": 1000, "dur": dur, "frames": 1, "mir": mir, "scan": "Point",
-            "ncol": 3, "bg": "No", "bgk": 0.2, "irf": "No", "irfw": 250, "wr": 200, "wz": 1000, "nfiles": 1, "fmt": ".sim"}
+            "bx": 5000, "by": 5000, "bz": 5000, "freq": 1000, "dur": dur, "frames": 1, "mir": 60, "scan": "Point",
+            "ncol": 3, "bg": "No", "bgk": 0.2, "irf": "No", "irfw": 250, "wr": 200, "wz": 1000,
+            "r012": 63, "r013": 51, "r023": 68, "nfiles": 1, "fmt": ".sim",
+            "notes": "Example row - shows the expected format" if sid == "S00"
+            else "from Simulation_parameters.xlsx (box size assumed)"}
     for key, v in vals.items():
-        s[f"{SC[key]}{r}"] = v
-    if sid != "S00":
-        s[f"{SC['notes']}{r}"] = "from Simulation_parameters.xlsx (box size assumed)"
-    else:
-        s[f"{SC['notes']}{r}"] = "Example row - shows the expected format"
-    for (nm, D, N, b, lt) in species:
-        p[f"A{row_sp}"] = sid; p[f"B{row_sp}"] = nm; p[f"C{row_sp}"] = D; p[f"D{row_sp}"] = N
-        for c_, v in zip("EFGH", list(b) + [0]):
-            p[f"{c_}{row_sp}"] = v
-        for c_, v in zip("IJKL", list(lt) + [lt[-1]]):
-            p[f"{c_}{row_sp}"] = v
-        p[f"M{row_sp}"] = "No FRET"
-        row_sp += 1
+        s[f"{C[key]}{r}"] = v
+    for sidx, (nm, D, N, b, lt, fret) in enumerate(species, start=1):
+        sk = lambda kk: C[f"s{sidx}_{kk}"]  # noqa: E731
+        s[f"{sk('nm')}{r}"] = nm; s[f"{sk('D')}{r}"] = D; s[f"{sk('N')}{r}"] = N
+        for ch in range(3):
+            s[f"{sk(f'b{ch + 1}')}{r}"] = b[ch]
+            s[f"{sk(f't{ch + 1}')}{r}"] = lt[ch]
+        if fret:
+            s[f"{sk('fret')}{r}"] = fret[0]
+            for pair, val in zip(("R12", "R13", "R23"), fret[1:]):
+                if val is not None:
+                    s[f"{sk(pair)}{r}"] = val
+        else:
+            s[f"{sk('fret')}{r}"] = "No FRET"
 
 wb.move_sheet("Lists", offset=10)
+wb.move_sheet("Calc", offset=10)
 wb.active = 1
-out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "PAMsim_simulation_planner.xlsx")
-wb.save(out)
-print("saved", out, "species rows used", row_sp - SP_FIRST)
+wb.save(OUT)
+print("saved", OUT, "-", len(cols), "columns")
