@@ -94,8 +94,12 @@ def read_planner(path):
             continue
         ncol = int(_num(g("Colours"), 1) or 1)
         ncol = max(1, min(4, ncol))
-        wr = _num(g("wr [nm]"), 200.0)
-        wz = _num(g("wz [nm]"), 1000.0)
+        # focus per colour (laser); older planners had one wr / wz for all colours
+        wr_all = _num(g("wr [nm]"), 200.0)
+        wz_all = _num(g("wz [nm]"), 1000.0)
+        wr = [_num(g(f"wr {k} [nm]"), wr_all) for k in (1, 2, 3)]
+        wz = [_num(g(f"wz {k} [nm]"), wz_all) for k in (1, 2, 3)]
+        shift = {ax: [_num(g(f"{ax} {k} [nm]"), 0.0) for k in (1, 2, 3)] for ax in ("dX", "dY", "dZ")}
         r0 = np.zeros((4, 4))
         r0[1, 0] = _num(g("R0 1→2"), 63.0)
         r0[2, 0] = _num(g("R0 1→3"), 51.0)
@@ -109,14 +113,22 @@ def read_planner(path):
             bright = [_num(g(f"Bright. {k} [kHz]", band=band), 0.0) or 0.0 for k in (1, 2, 3)]
             lt = [_num(g(f"Lifetime {k} [ns]", band=band), 4.0) for k in (1, 2, 3)]
             fret = FRET.get(_text(g("FRET", band=band)).lower(), 1)
+            # FRET only between dyes that exist (brightness > 0) and pairs with a distance R;
+            # an empty R (or a missing dye) switches that pair off (R0 = 0 -> rate 0)
             R = np.zeros((4, 4))
-            R[1, 0] = _num(g("R 1→2", band=band), 50.0)
-            R[2, 0] = _num(g("R 1→3", band=band), 50.0)
-            R[2, 1] = _num(g("R 2→3", band=band), 50.0)
+            sp_r0 = r0.copy()
+            for (a, d), head in (((1, 0), "R 1→2"), ((2, 0), "R 1→3"), ((2, 1), "R 2→3")):
+                dist = _num(g(head, band=band))
+                if dist is None or dist <= 0 or bright[a] <= 0 or bright[d] <= 0:
+                    sp_r0[a, d] = 0.0
+                    R[a, d] = 1e4
+                else:
+                    R[a, d] = dist
             species.append(Species(
                 name=name or band, color=ncol, fret=fret, D=_num(g("D [µm²/s]", band=band), 1.0) or 0.0,
-                N=int(round(n)), wr=[wr] * 4, wz=[wz] * 4, brightness=bright + [0.0],
-                LT=lt + [lt[-1]], R0=r0.copy(), R=R))
+                N=int(round(n)), wr=wr + [wr[-1]], wz=wz + [wz[-1]],
+                dX=shift["dX"] + [0.0], dY=shift["dY"] + [0.0], dZ=shift["dZ"] + [0.0], brightness=bright + [0.0],
+                LT=lt + [lt[-1]], R0=sp_r0, R=R))
         seed = _num(g("Seed"))
         bgk = _num(g("Background [kHz/ch]"), 0.0) or 0.0
         settings = SimSettings(
@@ -132,7 +144,7 @@ def read_planner(path):
             noise=[bgk] * 4,
             use_irf=_text(g("IRF?")).lower() == "yes",
             irf_width=_num(g("IRF width [ps]"), 250.0),
-            species=species or [Species(color=ncol, wr=[wr] * 4, wz=[wz] * 4)],
+            species=species or [Species(color=ncol, wr=wr + [wr[-1]], wz=wz + [wz[-1]])],
         )
         out.append(PlannerRow(
             sim_id=sim_id, settings=settings, folder=_text(g("Output folder")),

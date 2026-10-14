@@ -15,8 +15,9 @@ const h1 = (text) => new Paragraph({ heading: HeadingLevel.HEADING_1, children: 
 const h2 = (text) => new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun({ text })] });
 const bullet = (runs) => new Paragraph({ numbering: { reference: "bullets", level: 0 }, spacing: { after: 60 },
   children: typeof runs === "string" ? [t(runs)] : runs });
-const step = (runs) => new Paragraph({ numbering: { reference: "steps", level: 0 }, spacing: { after: 60 },
+const step = (runs, ref = "steps") => new Paragraph({ numbering: { reference: ref, level: 0 }, spacing: { after: 60 },
   children: typeof runs === "string" ? [t(runs)] : runs });
+const step5 = (runs) => step(runs, "steps5");
 const codeBlock = (lines) => lines.map((l, i) => new Paragraph({
   shading: { type: ShadingType.CLEAR, fill: "F2F4F7", color: "auto" },
   spacing: { after: i === lines.length - 1 ? 160 : 0 }, indent: { left: 200 },
@@ -73,7 +74,7 @@ const children = [
     ["Species: Brightness 1/2/3", "Empty means 0 = the species carries no dye of this colour."],
   ], [3000, 6638]),
   gap(),
-  p("Everything else is optional (defaults in chapter 4). Purpose, Status, Priority and all Results columns are only for your own bookkeeping - PAMsim does not use them."),
+  p("Everything else is optional (defaults in chapter 4). The formulas of the planner use the same defaults for empty cells as PAMsim, so the estimates are right even with empty cells. Purpose, Status, Priority and all Results columns are only for your own bookkeeping - PAMsim does not use them."),
 
   h1("4  Column reference"),
   h2("4.1  Identification"),
@@ -98,10 +99,12 @@ const children = [
     ["Background", "Background count rate per channel", "kHz", "Optional", "0"],
     ["IRF? / IRF width", "Simulate an instrument response function", "ps", "Optional", "No / 250"],
   ]),
-  h2("4.3  Focus and Förster radii"),
+  h2("4.3  Focus per colour and Förster radii"),
+  p("Every colour (laser) has its own focus: its size wr / wz and its position dX / dY / dZ. The expected count rate of each channel is calculated with the focus of that colour, and PAMsim simulates each laser with its own focus. Shifted foci (dX/dY/dZ not 0) reduce the overlap and therefore the cross-correlation amplitude - useful to simulate an imperfectly aligned setup."),
   colTable([
-    ["wr", "Lateral 1/e² radius of the focus (all colours)", "nm", "Optional", "200"],
-    ["wz", "Axial 1/e² radius of the focus (all colours)", "nm", "Optional", "1000"],
+    ["wr 1, wr 2, wr 3", "Lateral 1/e² radius of the focus of colour 1, 2, 3", "nm", "Optional", "200"],
+    ["wz 1, wz 2, wz 3", "Axial 1/e² radius of the focus of colour 1, 2, 3", "nm", "Optional", "1000"],
+    ["dX, dY, dZ 1/2/3", "Shift of the focus of each colour from the box centre", "nm", "Optional", "0 (foci overlap)"],
     ["R0 1→2, 1→3, 2→3", "Förster radius of each dye pair (donor colour → acceptor colour)", "Å or nm", "Optional", "63, 51, 68"],
   ]),
   h2("4.4  Species blocks (Species 1, Species 2, ...)"),
@@ -113,12 +116,13 @@ const children = [
     ["Brightness 1/2/3", "Count rate of one molecule in the focus centre for each colour; 0 = no dye of this colour", "kHz", "Required", "0"],
     ["Lifetime 1/2/3", "Fluorescence lifetime of the dye of each colour", "ns", "Optional", "4"],
     ["FRET", "No FRET / Static FRET / Dynamic FRET", "-", "Optional", "No FRET"],
-    ["R 1→2, 1→3, 2→3", "Dye distances for FRET (same unit as R0)", "Å or nm", "Optional", "50"],
+    ["R 1→2, 1→3, 2→3", "Dye distance for FRET between these two colours (same unit as R0)", "Å or nm", "Optional", "no FRET for this pair"],
     ["E 1→2, ... (grey)", "FRET efficiency E = 1/(1 + (R/R0)^6), calculated", "-", "Calculated", "-"],
     ["Conc. (grey)", "Concentration of the species, calculated", "nM", "Calculated", "-"],
     ["Check (grey)", "Check of this species (see chapter 6)", "-", "Calculated", "-"],
   ]),
   p([t("Example - a green-red complex in a 3-colour experiment: "), t("Brightness 1 = 0, Brightness 2 = 70, Brightness 3 = 50", { bold: true }), t(".")]),
+  p([t("FRET happens only between dyes that are present (brightness > 0) and only for the pairs with a distance R. Example: a species with dyes 1 and 2 and FRET between them gets "), t("FRET = Static FRET, R 1→2 = 50", { bold: true }), t(", and R 1→3 / R 2→3 stay empty.")]),
   h2("4.5  Totals, output and results"),
   colTable([
     ["Species used (grey)", "Number of filled species blocks", "-", "Calculated", "-"],
@@ -132,10 +136,10 @@ const children = [
   ]),
 
   h1("5  Running the simulations in PAMsim"),
-  step([t("Click "), t("Load from planner...", { bold: true }), t(" (top of the window) and choose the planner file.")]),
-  step("A list shows all simulations with their check; red rows have a red check."),
-  step([t("To check or change one simulation first: double-click it (or "), t("Load into editor", { bold: true }), t("). All values appear in the PAMsim window; press Start.")]),
-  step([t("To run several: select them with Ctrl + click (single rows) or Shift + click (a range) and click "), t("Run selected", { bold: true }), t(".")]),
+  step5([t("Click "), t("Load from planner...", { bold: true }), t(" (top of the window) and choose the planner file.")]),
+  step5("A list shows all simulations with their check; red rows have a red check."),
+  step5([t("To check or change one simulation first: double-click it (or "), t("Load into editor", { bold: true }), t("). All values appear in the PAMsim window; press Start.")]),
+  step5([t("To run several: select them with Ctrl + click (single rows) or Shift + click (a range) and click "), t("Run selected", { bold: true }), t(".")]),
   p("PAMsim runs the selected simulations one after another, each with exactly the parameters of its own row - different boxes, durations, species, brightness and FRET are no problem. The Log tab shows --- S01 ---, --- S02 ---, ... with the count rates and the written files. Stop ends the whole sequence."),
   bullet([t("Each simulation is written into its own folder named after its file name, e.g. "), t("C:\\Sims\\Crazy_2\\Crazy_2_1.sim", { font: "Consolas", size: 19 }), t(" - the folder is created automatically. Switch this off in PAMsim's Output box (Own folder per simulation) to write all files into the output folder directly.")]),
   bullet("Every simulation needs its own file name - two rows with the same name and output folder write into the same folder and overwrite each other's files."),
@@ -150,6 +154,7 @@ const children = [
     ["⚠ B > 10% of freq.", "The focus starts to saturate. Keep the brightness below 10% of the sampling frequency (< 100 kHz at 1000 kHz)."],
     ["⚠ step > 10% of wr", "One diffusion step sqrt(2·D/frequency) is large compared with the focus. Raise the sampling frequency."],
     ["⚠ no brightness", "All brightness values of the species are 0 - it would be invisible."],
+    ["⚠ uses a colour above Colours", "The species has a brightness in colour 3 (or 2) but Colours is smaller - that colour is ignored. Increase Colours."],
     ["⚠ FRET needs ≥ 2 colours / set R", "FRET is selected but Colours < 2 or no distance R is given."],
     ["⚠ box too small", "Use at least 8·wr laterally and 3·wz axially."],
     ["⚠ > 8 GB per file", "Too many photons for one file: shorten the duration and use several files instead."],
@@ -187,6 +192,7 @@ const children = [
     ["'folder not found' in the Log", "The output folder of the row does not exist on this PC (e.g. a Mac path). Correct it in the planner, or the files go to PAMsim's folder."],
     ["Fitted D too small, concentration too large", "The brightness was too close to the sampling frequency (saturated focus) - see chapter 6."],
     ["A species seems missing", "Its Molecules N is empty or 0, or Colours is too small for its brightness columns."],
+    ["#DIV/0! in the planner", "Only in planners made before this version, when Box, Sampling frequency or wr/wz are empty. Fill them in, or copy your rows into a new planner (python make_planner.py --empty -o new.xlsx)."],
   ], [3600, 6038]),
 ];
 
@@ -205,6 +211,8 @@ const doc = new Document({
     { reference: "bullets", levels: [{ level: 0, format: LevelFormat.BULLET, text: "•", alignment: AlignmentType.LEFT,
       style: { paragraph: { indent: { left: 540, hanging: 270 } } } }] },
     { reference: "steps", levels: [{ level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.LEFT,
+      style: { paragraph: { indent: { left: 540, hanging: 300 } } } }] },
+    { reference: "steps5", levels: [{ level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.LEFT,
       style: { paragraph: { indent: { left: 540, hanging: 300 } } } }] },
   ] },
   sections: [{

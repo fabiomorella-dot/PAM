@@ -70,11 +70,13 @@ lines = [
     (f"•  Then {MAX_SPECIES} species blocks side by side (Species 1, Species 2, ...). Each species has its own name, D, number of", None),
     ("    molecules N, brightness and lifetime per colour, and FRET (type and dye distances R). Leave unused species blocks empty.", None),
     ("•  Brightness 0 = this species carries no dye of that colour (e.g. a green-red complex: B1 = 0, B2 = 70, B3 = 50).", None),
+    ("•  Focus per colour: each colour (laser) has its own focus size wr / wz and position dX / dY / dZ (0 = foci overlap).", None),
     ("•  FRET: Förster radii R0 are set once per simulation (purple block); per species choose FRET type and distances R.", None),
     ("    The FRET efficiency E = 1 / (1 + (R/R0)^6) is calculated for you (grey cells).", None),
     ("•  Grey cells are calculated: concentration, FRET efficiency, a check per species, expected count rates, photons, memory.", None),
     ("•  Use the + / - buttons above the columns (Excel grouping) to fold species blocks away.", None),
     ("•  Fix every red check before running a simulation; orange checks bias the results slightly.", None),
+    ("•  Empty cells are treated like in PAMsim: box 5000 nm, 1000 kHz, 10 s, 1 colour, wr 200 nm, wz 1000 nm, R0 63/51/68.", None),
     ("", None),
     ("Colour code", Font(name=F, size=12, bold=True)),
     ("Yellow cells with blue text = your input.   Grey cells with black text = formulas (do not overwrite).", None),
@@ -94,7 +96,8 @@ lines = [
     ("", None),
     ("Example rows", Font(name=F, size=12, bold=True)),
     ("S00 is a worked example (realistic 3-colour FCCS mixture with a FRET pair). S01-S11 are the simulations from your earlier", None),
-    ("spreadsheet (box 5000 nm, wr 200 nm, wz 1000 nm assumed) - the checks show which of them saturate. Overwrite or delete rows freely.", None),
+    ("spreadsheet (box 5000 nm, wr 200 nm, wz 1000 nm for all colours assumed) - the checks show which of them saturate.", None),
+    ("S00 also shows colour-dependent foci (wr 180/210/240 nm, wz 900/1050/1200 nm, colour 3 shifted 100 nm in z).", None),
     (f"More than {MAX_SPECIES} species? Run  python make_planner.py --species 10 -o new_planner.xlsx  (see the README).", None),
 ]
 for i, (t, f) in enumerate(lines, start=1):
@@ -123,8 +126,10 @@ GUIDE = [
     ("Colours", "Number of colours = PIE lasers = detection channels (1-3)", "-", "Required", "1 (brightness 2/3 ignored!)"),
     ("Background? / Background", "Uncorrelated background and its count rate per channel", "kHz", "Optional", "No / 0"),
     ("IRF? / IRF width", "Simulate an instrument response function", "ps", "Optional", "No / 250"),
-    ("Focus and Förster radii", None, None, None, None),
-    ("wr / wz", "Lateral / axial 1/e² radius of the focus (all colours)", "nm", "Optional", "200 / 1000"),
+    ("Focus per colour and Förster radii", None, None, None, None),
+    ("wr 1/2/3", "Lateral 1/e² radius of the focus of each colour (laser)", "nm", "Optional", "200"),
+    ("wz 1/2/3", "Axial 1/e² radius of the focus of each colour (laser)", "nm", "Optional", "1000"),
+    ("dX, dY, dZ 1/2/3", "Shift of each colour's focus from the box centre (focus overlap for FCCS)", "nm", "Optional", "0"),
     ("R0 1→2, 1→3, 2→3", "Förster radius per dye pair (donor colour → acceptor colour)", "Å or nm", "Optional", "63, 51, 68"),
     ("Species blocks (one block per species; leave unused blocks empty)", None, None, None, None),
     ("Name", "Name of the species", "-", "Optional", "Species 1, 2, ..."),
@@ -133,7 +138,7 @@ GUIDE = [
     ("Brightness 1/2/3", "Count rate of one molecule in the focus centre per colour; 0 = no dye of this colour", "kHz", "Required", "0"),
     ("Lifetime 1/2/3", "Fluorescence lifetime per colour", "ns", "Optional", "4"),
     ("FRET", "No FRET / Static FRET / Dynamic FRET", "-", "Optional", "No FRET"),
-    ("R 1→2, 1→3, 2→3", "Dye distances for FRET (same unit as R0)", "Å or nm", "Optional", "50"),
+    ("R 1→2, 1→3, 2→3", "Dye distance for FRET between two colours; only dyes with brightness > 0 take part", "Å or nm", "Optional", "no FRET for this pair"),
     ("E, Conc., Check (grey)", "FRET efficiency 1/(1+(R/R0)^6), concentration, check of the species", "-, nM", "Calculated", "-"),
     ("Totals, output and results", None, None, None, None),
     ("Exp. rates, Photons, Memory, Check (grey)", "Expected count rate per channel (incl. saturation), photons and memory per file, overall check", "kHz, M, GB", "Calculated", "-"),
@@ -198,8 +203,17 @@ for k, hd, w, com in (("bx", "Box x [nm]", 8, None), ("by", "Box y [nm]", 8, Non
                       ("bg", "Background?", 9, None), ("bgk", "Background [kHz/ch]", 9, None), ("irf", "IRF?", 6, None),
                       ("irfw", "IRF width [ps]", 7, None)):
     add(k, hd, w, "gen", "Measurement", comment=com)
-add("wr", "wr [nm]", 7, "foc", "Focus", comment="1/e² radius, same for all colours here")
-add("wz", "wz [nm]", 7, "foc", "Focus")
+for ch in (1, 2, 3):
+    add(f"wr{ch}", f"wr {ch} [nm]", 7, "foc", "Focus per colour",
+        comment="Lateral 1/e² radius of the focus of colour 1 (laser 1)" if ch == 1 else None)
+for ch in (1, 2, 3):
+    add(f"wz{ch}", f"wz {ch} [nm]", 7, "foc", "Focus per colour",
+        comment="Axial 1/e² radius of the focus of colour 1 (laser 1)" if ch == 1 else None)
+for ax in ("dX", "dY", "dZ"):
+    for ch in (1, 2, 3):
+        add(f"{ax}{ch}", f"{ax} {ch} [nm]", 7, "foc", "Focus per colour",
+            comment=("Shift of the focus of colour 1 from the box centre (0 = perfectly overlapping foci)"
+                     if (ax, ch) == ("dX", 1) else None))
 add("r012", "R0 1→2", 7, "fret", "Förster radii R0", comment="Förster radius donor colour 1 → acceptor colour 2 (Å or nm)")
 add("r013", "R0 1→3", 7, "fret", "Förster radii R0")
 add("r023", "R0 2→3", 7, "fret", "Förster radii R0")
@@ -270,6 +284,9 @@ for sidx in range(1, MAX_SPECIES + 1):
         cc += 1
 
 # ====================================================================== formulas
+DEFAULTS = {"bx": 5000, "by": 5000, "bz": 5000, "freq": 1000, "dur": 10, "ncol": 1,
+            "wr1": 200, "wr2": 200, "wr3": 200, "wz1": 1000, "wz2": 1000, "wz3": 1000,
+            "r012": 63, "r013": 51, "r023": 68}
 for r in range(FIRST, LAST + 1):
     for idx, (k, hd, w, band, title, kind, com) in enumerate(cols, start=1):
         c = s.cell(row=r, column=idx)
@@ -277,11 +294,13 @@ for r in range(FIRST, LAST + 1):
         c.fill = INPUT if kind == "in" else CALC
         c.font = BLUE if kind == "in" else BLACK
         c.alignment = Alignment(vertical="top", wrap_text=k in ("purpose", "check", "notes", "folder"))
-    S = lambda k: f"Simulations!${C[k]}{r}"  # noqa: E731
-    g = lambda k: f"${C[k]}{r}"  # noqa: E731
+    # empty input cells get the same defaults as PAMsim uses (no #DIV/0! for empty cells)
+    def _d(ref, k):
+        return f'IF({ref}="",{DEFAULTS[k]},{ref})' if k in DEFAULTS else ref
+    S = lambda k: _d(f"Simulations!${C[k]}{r}", k)  # noqa: E731
+    g = lambda k: _d(f"${C[k]}{r}", k)  # noqa: E731
     ida = g("id")
     vol = f"({S('bx')}*{S('by')}*IF({S('bz')}>0,{S('bz')},1))"
-    prof = f"(PI()/2*{S('wr')}^2*IF({S('bz')}>0,SQRT(PI()/2)*{S('wz')},1))"
     for sidx in range(1, MAX_SPECIES + 1):
         sk = lambda k: f"s{sidx}_{k}"  # noqa: E731
         Nn, Dd = S(sk("N")), S(sk("D"))
@@ -289,17 +308,19 @@ for r in range(FIRST, LAST + 1):
         calc[f"{CC[(sidx, 'used')]}{r}"] = f"=IF({used},1,0)"
         for ch in (1, 2, 3):
             B = S(sk(f"b{ch}"))
+            wr, wz = S(f"wr{ch}"), S(f"wz{ch}")  # focus of this colour
+            prof = f"(PI()/2*{wr}^2*IF({S('bz')}>0,SQRT(PI()/2)*{wz},1))"
             u0 = f"LN({B}/{S('freq')})"
-            sat3 = (f"2*PI()*{S('wr')}^2*{S('wz')}/2^1.5*(2/3*{u0}^1.5+SQRT({u0})"
+            sat3 = (f"2*PI()*{wr}^2*{wz}/2^1.5*(2/3*{u0}^1.5+SQRT({u0})"
                     f"+{B}/{S('freq')}*SQRT(PI())/2*ERFC(SQRT({u0})))")
-            sat2 = f"PI()*{S('wr')}^2/2*({u0}+1)"
+            sat2 = f"PI()*{wr}^2/2*({u0}+1)"
             calc[f"{CC[(sidx, f'rate{ch}')]}{r}"] = (
                 f"=IF(OR(NOT({used}),N({B})<=0,N({Nn})<=0,{ch}>N({S('ncol')})),0,"
                 f"IF({B}<{S('freq')},{Nn}/{vol}*{B}*{prof},{Nn}/{vol}*{S('freq')}*IF({S('bz')}>0,{sat3},{sat2})))")
         calc[f"{CC[(sidx, 'maxb')]}{r}"] = (f"=IF(NOT({used}),0,MAX(N({S(sk('b1'))}),N({S(sk('b2'))}),N({S(sk('b3'))}))"
                                            f"/{S('freq')})")
         calc[f"{CC[(sidx, 'step')]}{r}"] = (f"=IF(OR(NOT({used}),N({Dd})<=0),0,"
-                                           f"SQRT(2*{Dd}*1000000/({S('freq')}*1000))/{S('wr')})")
+                                           f"SQRT(2*{Dd}*1000000/({S('freq')}*1000))/MIN({S('wr1')},{S('wr2')},{S('wr3')}))")
         # FRET efficiencies (visible)
         for pair, r0 in (("12", "r012"), ("13", "r013"), ("23", "r023")):
             R = g(sk(f"R{pair}"))
@@ -319,9 +340,11 @@ for r in range(FIRST, LAST + 1):
             f'IF({mx}>0.1,"⚠ B > 10% of freq.",'
             f'IF({mx}=0,"⚠ no brightness",'
             f'IF({stp}>0.1,"⚠ step > 10% of wr",'
+            f'IF(OR(AND(N({g(sk("b3"))})>0,{g("ncol")}<3),AND(N({g(sk("b2"))})>0,{g("ncol")}<2)),'
+            f'"⚠ uses a colour above Colours = "&{g("ncol")}&" (ignored)",'
             f'IF(AND({fr}<>"",{fr}<>"No FRET",N({g("ncol")})<2),"⚠ FRET needs ≥ 2 colours",'
             f'IF(AND({fr}<>"",{fr}<>"No FRET",N({g(sk("R12"))})+N({g(sk("R13"))})+N({g(sk("R23"))})=0),"⚠ FRET: set R",'
-            f'"✔ OK")))))))')
+            f'"✔ OK"))))))))')
     # totals
     used_cells = ",".join(f"Calc!{CC[(i, 'used')]}{r}" for i in range(1, MAX_SPECIES + 1))
     s[f"{C['nsp']}{r}"] = f'=IF({ida}="","",SUM({used_cells}))'
@@ -341,8 +364,8 @@ for r in range(FIRST, LAST + 1):
     s[f"{C['check']}{r}"] = (
         f'=IF({ida}="","",IF({g("nsp")}=0,"⚠ no species entered",'
         f'IF(({nred})>0,"✖ "&({nred})&" species saturated - see the species checks",'
-        f'IF(MIN({g("bx")},{g("by")})<8*{g("wr")},"⚠ box too small laterally (< 8·wr)",'
-        f'IF(AND({g("bz")}>0,{g("bz")}<3*{g("wz")}),"⚠ box too small axially (< 3·wz)",'
+        f'IF(MIN({g("bx")},{g("by")})<8*MAX({g("wr1")},{g("wr2")},{g("wr3")}),"⚠ box too small laterally (< 8·wr)",'
+        f'IF(AND({g("bz")}>0,{g("bz")}<3*MAX({g("wz1")},{g("wz2")},{g("wz3")})),"⚠ box too small axially (< 3·wz)",'
         f'IF({g("mem")}>8,"⚠ > 8 GB per file: shorten the duration and use several files",'
         f'IF(({nor})>0,"⚠ "&({nor})&" species with a warning","✔ OK")))))))')
 calc.sheet_state = "hidden"
@@ -443,10 +466,14 @@ for k, (sid, name, purpose, folder, status, prio, dur, species) in enumerate(sim
     r = FIRST + k
     vals = {"id": sid, "name": name, "purpose": purpose, "folder": folder, "status": status, "prio": prio,
             "bx": 5000, "by": 5000, "bz": 5000, "freq": 1000, "dur": dur, "frames": 1, "mir": 60, "scan": "Point",
-            "ncol": 3, "bg": "No", "bgk": 0.2, "irf": "No", "irfw": 250, "wr": 200, "wz": 1000,
+            "ncol": 3, "bg": "No", "bgk": 0.2, "irf": "No", "irfw": 250,
+            "wr1": 200, "wr2": 200, "wr3": 200, "wz1": 1000, "wz2": 1000, "wz3": 1000,
+            "dX1": 0, "dX2": 0, "dX3": 0, "dY1": 0, "dY2": 0, "dY3": 0, "dZ1": 0, "dZ2": 0, "dZ3": 0,
             "r012": 63, "r013": 51, "r023": 68, "nfiles": 1, "fmt": ".sim",
             "notes": "Example row - shows the expected format" if sid == "S00"
             else "from Simulation_parameters.xlsx (box size assumed)"}
+    if sid == "S00":
+        vals.update({"wr1": 180, "wr2": 210, "wr3": 240, "wz1": 900, "wz2": 1050, "wz3": 1200, "dZ3": 100})
     for key, v in vals.items():
         s[f"{C[key]}{r}"] = v
     for sidx, (nm, D, N, b, lt, fret) in enumerate(species, start=1):
