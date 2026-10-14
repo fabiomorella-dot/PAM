@@ -105,6 +105,65 @@ h.column_dimensions["B"].width = 125
 h["B16"].fill = INPUT
 h.sheet_view.showGridLines = False
 
+# ====================================================================== Column guide
+GUIDE = [
+    ("Identification", None, None, None, None),
+    ("Sim ID", "Unique short name of the simulation (e.g. S12)", "-", "Required", "row is skipped"),
+    ("File name", "Files are written as <name>_1.sim, <name>_2.sim, ...", "-", "Optional", "the Sim ID"),
+    ("Purpose / question", "What you want to learn from this simulation", "-", "Not used", "-"),
+    ("Output folder", "Folder for the files; must exist on the PC that runs PAMsim", "-", "Optional", "PAMsim's output folder"),
+    ("Status, Priority", "Your bookkeeping", "-", "Not used", "-"),
+    ("Measurement", None, None, None, None),
+    ("Box x, y, z", "Size of the simulation box; z = 0 gives 2D (membrane)", "nm", "Optional", "5000 each"),
+    ("Sampling freq.", "Time resolution of the random walk (time step = 1/frequency)", "kHz", "Optional", "1000"),
+    ("Duration", "Simulated measurement time per file", "s", "Required", "10"),
+    ("Frames", "Number of frames (relevant for scanning)", "-", "Optional", "1"),
+    ("Microtime range", "TCSPC range (PIE period)", "ns", "Optional", "80"),
+    ("Scan type", "Point / Raster scan / Line scan / Circle scan", "-", "Optional", "Point"),
+    ("Colours", "Number of colours = PIE lasers = detection channels (1-3)", "-", "Required", "1 (brightness 2/3 ignored!)"),
+    ("Background? / Background", "Uncorrelated background and its count rate per channel", "kHz", "Optional", "No / 0"),
+    ("IRF? / IRF width", "Simulate an instrument response function", "ps", "Optional", "No / 250"),
+    ("Focus and Förster radii", None, None, None, None),
+    ("wr / wz", "Lateral / axial 1/e² radius of the focus (all colours)", "nm", "Optional", "200 / 1000"),
+    ("R0 1→2, 1→3, 2→3", "Förster radius per dye pair (donor colour → acceptor colour)", "Å or nm", "Optional", "63, 51, 68"),
+    ("Species blocks (one block per species; leave unused blocks empty)", None, None, None, None),
+    ("Name", "Name of the species", "-", "Optional", "Species 1, 2, ..."),
+    ("D", "Diffusion coefficient", "µm²/s", "Required", "1"),
+    ("Molecules N", "Number of molecules in the box", "-", "Required", "0 = species absent"),
+    ("Brightness 1/2/3", "Count rate of one molecule in the focus centre per colour; 0 = no dye of this colour", "kHz", "Required", "0"),
+    ("Lifetime 1/2/3", "Fluorescence lifetime per colour", "ns", "Optional", "4"),
+    ("FRET", "No FRET / Static FRET / Dynamic FRET", "-", "Optional", "No FRET"),
+    ("R 1→2, 1→3, 2→3", "Dye distances for FRET (same unit as R0)", "Å or nm", "Optional", "50"),
+    ("E, Conc., Check (grey)", "FRET efficiency 1/(1+(R/R0)^6), concentration, check of the species", "-, nM", "Calculated", "-"),
+    ("Totals, output and results", None, None, None, None),
+    ("Exp. rates, Photons, Memory, Check (grey)", "Expected count rate per channel (incl. saturation), photons and memory per file, overall check", "kHz, M, GB", "Calculated", "-"),
+    ("Number of files", "Independent repeats with the same parameters", "-", "Optional", "1"),
+    ("Seed", "Random seed; file k uses seed + k - 1", "-", "Optional", "random"),
+    ("Format", ".sim (PAM) / .npz / both", "-", "Optional", ".sim"),
+    ("Date run ... Result notes", "Your notes after running and analysing", "-", "Not used", "-"),
+]
+gs = wb.create_sheet("Column guide")
+for j, (hd, w) in enumerate((("Column", 34), ("Meaning", 70), ("Unit", 11), ("Required?", 12), ("If left blank", 26)), start=1):
+    c = gs.cell(row=1, column=j, value=hd)
+    c.fill = HDR; c.font = WHITE_B; c.border = BOX
+    gs.column_dimensions[L(j)].width = w
+for i, row in enumerate(GUIDE, start=2):
+    if row[1] is None:
+        gs.merge_cells(start_row=i, start_column=1, end_row=i, end_column=5)
+        c = gs.cell(row=i, column=1, value=row[0])
+        c.font = Font(name=F, bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="5A7FA8")
+        continue
+    for j, v in enumerate(row, start=1):
+        c = gs.cell(row=i, column=j, value=v)
+        c.border = BOX; c.alignment = Alignment(wrap_text=True, vertical="top")
+        c.font = Font(name=F, size=10, bold=(j == 4 and v == "Required"), color="9C1C1C" if (j == 4 and v == "Required") else "000000")
+        if j == 4 and v == "Required":
+            c.fill = PatternFill("solid", fgColor="FDE2E2")
+gs.freeze_panes = "A2"
+gs.cell(row=len(GUIDE) + 3, column=1, value="Not in the planner (set them in PAMsim after 'Load into editor'): crosstalk, "
+        "detection efficiency, bleaching, anisotropy, dynamic FRET rates, barrier maps.").font = Font(name=F, italic=True, size=10)
+gs.cell(row=len(GUIDE) + 4, column=1, value="Full explanation: planning/PAMsim_planner_guide.docx").font = Font(name=F, italic=True, size=10)
+
 # ====================================================================== Lists
 ls = wb.create_sheet("Lists")
 for col, (title, vals) in {"A": ("Status", ["Idea", "Planned", "Running", "Done", "Analysed", "Discarded"]),
@@ -406,9 +465,10 @@ for k, (sid, name, purpose, folder, status, prio, dur, species) in enumerate(sim
         else:
             s[f"{sk('fret')}{r}"] = "No FRET"
 
+wb.move_sheet("Column guide", offset=-(len(wb.sheetnames) - 2))
 wb.move_sheet("Lists", offset=10)
 wb.move_sheet("Calc", offset=10)
-wb.active = 1
+wb.active = wb.sheetnames.index("Simulations")
 wb.save(OUT)
 print(f"saved {OUT}  ({N_ROWS} simulation rows, {MAX_SPECIES} species blocks, {len(cols)} columns)")
 print("Open it in Excel; the calculated cells fill in when Excel opens the file.")

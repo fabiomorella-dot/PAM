@@ -46,6 +46,11 @@ python make_planner.py --rows 200 -o my_planner.xlsx   # 200 simulation rows
 
 It never overwrites an existing file unless you add `--force`.
 
+**`planning/PAMsim_planner_guide.docx`** explains every column (required or optional,
+units, defaults), running the simulations from PAMsim, the checks, and
+`make_planner.py` in detail. The same column reference is on the *Column guide*
+sheet of the planner.
+
 ## More
 
 * `python/README.md` – how the simulation works, all parameters, validation
