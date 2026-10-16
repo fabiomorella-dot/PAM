@@ -36,6 +36,18 @@ _ap.add_argument("--from", dest="source", metavar="OLD.xlsx",
                  help="copy all input cells (simulations, species, crosstalk sheet) from an existing planner "
                       "into the new layout instead of the example rows")
 ARGS = _ap.parse_args()
+# file names typed without (or with a mistyped) extension - Windows hides ".xlsx" in the Explorer
+_root, _ext = os.path.splitext(ARGS.output)
+if not _ext:
+    ARGS.output += ".xlsx"
+elif _ext.lower() != ".xlsx":
+    sys.exit(f"The new planner must be an .xlsx file: use  -o {_root}.xlsx")
+if ARGS.source and not os.path.isfile(ARGS.source):
+    if os.path.isfile(ARGS.source + ".xlsx"):
+        ARGS.source += ".xlsx"
+    else:
+        sys.exit(f"--from: file not found: {ARGS.source}  (run the command in the folder of that file, "
+                 f"or give its full path)")
 if os.path.exists(ARGS.output) and not ARGS.force:
     sys.exit(f"{ARGS.output} already exists - choose another name with -o, or add --force to overwrite it.")
 if ARGS.source and os.path.abspath(ARGS.source) == os.path.abspath(ARGS.output):
