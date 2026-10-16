@@ -84,6 +84,16 @@ class SimResult:
         from .io import save_npz
         return save_npz(self, path)
 
+    def save_info(self, path, files=None, sim_id=""):
+        """Write the plain-text summary (``<name>_<k>_info.txt``, see :mod:`pamsim.report`).
+
+        ``files``: the files written for this result (e.g. what ``save_sim``
+        returned); they are listed and give the "File name" line.
+        """
+        from .report import write_info
+        return write_info(path, self.settings, seed=self.seed, sim_id=sim_id, elapsed=self.elapsed,
+                          count_rates=self.count_rates_khz(), files=files)
+
 
 # --------------------------------------------------------------------------
 # kernel input preparation

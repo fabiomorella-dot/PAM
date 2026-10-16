@@ -323,6 +323,7 @@ def test_gui_presets_and_checks():
     from pamsim.gui import check_settings, presets
     for name, s in presets().items():
         s.sim_time = 0.05
+        s.seed = 1  # fixed: the smFRET preset has only 3 molecules, which may all miss the focus in 50 ms
         msgs = check_settings(s)
         assert not [m for lvl, m in msgs if lvl == "error"], (name, msgs)
         r = simulate(s)
@@ -346,6 +347,7 @@ def test_read_planner():
     ids = [r.sim_id for r in rows]
     assert ids[:3] == ["S00", "S01", "S02"] and "S11" in ids
     s00 = rows[0].settings
+    assert rows[0].extras == "-" and not rows[0].direct_excitation  # crosstalk sheet: S00 listed, switched off
     assert len(s00.species) == 4 and s00.species[0].color == 3
     assert list(s00.species[2].brightness[:3]) == [0, 70, 50]
     fret = s00.species[3]
@@ -356,3 +358,134 @@ def test_read_planner():
     s01 = rows[1].settings
     s01.sim_time = 0.05
     assert simulate(s01).macrotimes[0].size > 0
+
+
+# ---------------------------------------------------------------- crosstalk / direct excitation sheet
+PLANNER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "planning")
+
+
+def test_planner_crosstalk_sheet(tmp_path):
+    pytest.importorskip("openpyxl")
+    import subprocess
+    from openpyxl import load_workbook
+    from pamsim.planner import read_planner
+    path = tmp_path / "planner.xlsx"
+    subprocess.run([sys.executable, os.path.join(PLANNER_DIR, "make_planner.py"), "-o", str(path)], check=True,
+                   capture_output=True)
+    rows = {r.sim_id: r for r in read_planner(path)}
+    assert rows["S00"].extras == "-" and not rows["S00"].crosstalk  # example values are there but switched off
+    assert np.all(rows["S00"].settings.species[0].Cross == np.eye(4))
+    wb = load_workbook(path)
+    xs = wb["Crosstalk & direct exc"]
+    assert xs["A4"].value == "S00"
+    xs["D4"] = "Yes"; xs["H4"] = "Yes"                       # S00: both on (0.08/0.01/0.05, 0.05/0.01/0.06)
+    xs["A5"] = "S01"; xs["H5"] = "Yes"; xs["I5"] = 0.2      # S01: direct excitation only
+    xs["A6"] = "S02"; xs["D6"] = "No"; xs["E6"] = 0.3       # S02: listed but switched off
+    wb.save(path)
+    rows = {r.sim_id: r for r in read_planner(path)}
+    s00 = rows["S00"]
+    assert s00.extras == "crosstalk + direct exc." and s00.crosstalk == {"1→2": 0.08, "1→3": 0.01, "2→3": 0.05}
+    freq = s00.settings.freq
+    for sp in s00.settings.species:
+        np.testing.assert_allclose(sp.Cross[1:3, 0], [0.08, 0.01]); assert sp.Cross[2, 1] == 0.05
+        e = sp.excitation_matrix(freq)
+        np.testing.assert_allclose(np.diag(e)[:3], sp.brightness[:3] / freq * sp.Cross[:, :3].sum(axis=0))
+        np.testing.assert_allclose([e[1, 0], e[2, 0], e[2, 1]], [0.05 * e[1, 1], 0.01 * e[2, 2], 0.06 * e[2, 2]])
+        np.testing.assert_allclose(sp.excitation_matrix(freq), e)  # stable when applied again
+    assert rows["S01"].extras == "direct exc." and rows["S01"].settings.species[0].Cross[1, 0] == 0
+    assert rows["S02"].extras == "-" and rows["S03"].extras == "-"
+
+
+def test_crosstalk_and_direct_excitation_simulated():
+    from pamsim.planner import apply_crosstalk
+    s = small(sim_time=1.0, frames=1, species=[Species(name="dye 1", D=20, N=60, color=2, brightness=[100, 0, 0, 0]),
+                                                Species(name="dye 2", D=20, N=60, color=2, brightness=[0, 100, 0, 0])])
+    for sp in s.species:
+        apply_crosstalk(sp, s.freq, {"1→2": 0.1, "2→3": 0.5}, {"1→2": 0.2})  # 2→3 ignored: only 2 colours
+        assert sp.Cross[2, 1] == 0
+    r = simulate(s)
+    lab = np.concatenate(r.labels)
+    laser, exc, emit, chan = lab >> 6, (lab >> 4) & 3, (lab >> 2) & 3, lab & 3
+    d1 = emit == 0
+    assert abs(np.sum(d1 & (chan == 1)) / np.sum(d1 & (chan == 0)) / 0.1 - 1) < 0.15   # crosstalk dye 1 -> ch 2
+    d2 = (emit == 1) & (chan == 1)
+    assert abs(np.sum(d2 & (laser == 0)) / np.sum(d2 & (laser == 1)) / 0.2 - 1) < 0.15  # laser 1 excites dye 2
+    assert np.all(exc == emit) and not np.any(chan >= 2)
+
+
+def test_info_report(tmp_path):
+    from pamsim.report import simulation_info
+    R = np.zeros((4, 4)); R[1, 0] = 50
+    R0 = np.zeros((4, 4)); R0[1, 0] = 63
+    s = small(name="demo", sim_time=60, mi_range=50, use_noise=True, noise=[0.2] * 4, species=[
+        Species(name="green only", D=30, N=100, color=2, brightness=[80, 0, 0, 0], LT=[4, 3, 2, 2]),
+        Species(name="FRET pair", D=50, N=20, color=2, fret=2, brightness=[100, 70, 0, 0], LT=[4, 3, 2, 2], R=R, R0=R0)])
+    text = simulation_info(s, file_name="demo_1.sim", seed=7, sim_id="S12")
+    lines = [ln.strip() for ln in text.splitlines()]
+    assert lines[2:7] == ["File name:                   demo_1.sim".strip(), "Duration:                    60 s",
+                          "Microtime range:             50 ns", "Background:                  yes (0.2 kHz per channel)",
+                          "Number of species:           2"]
+    assert "FRET:                        static" in lines
+    assert any(ln.startswith("R0:") and "1->2 = 63" in ln for ln in lines)
+    assert any(ln.startswith("R (FRET pair):") and "1->2 = 50 (E = 0.800)" in ln for ln in lines)
+    assert "Crosstalk:                   no" in lines and "Direct excitation:           no" in lines
+    sp1 = lines[lines.index("Species 1"):lines.index("Species 2")]
+    assert "Number of colours:         1 (colour 1)" in sp1 and "Brightness:                80 kHz" in sp1
+    assert "Diffusion coefficient:     30 um^2/s" in sp1 and "Lifetime:                  4 ns" in sp1
+    sp2 = lines[lines.index("Species 2"):lines.index("Run")]
+    for k, b, lt in ((1, 100, 4), (2, 70, 3)):
+        assert f"Diffusion coefficient {k}:   50 um^2/s" in sp2 and f"Brightness {k}:              {b} kHz" in sp2
+        assert f"Lifetime {k}:                {lt} ns" in sp2 and any(ln.startswith(f"Concentration {k}:") for ln in sp2)
+    assert "Planner Sim ID:            S12" in lines and "Seed:                      7" in lines
+    # with crosstalk / direct excitation, and written next to a simulated file
+    from pamsim.planner import apply_crosstalk
+    for sp in s.species:
+        apply_crosstalk(sp, s.freq, {"1→2": 0.05}, {"1→2": 0.1})
+    s.sim_time = 0.2
+    r = simulate(s)
+    files = r.save_sim(tmp_path / "demo_1.sim")
+    path = r.save_info(tmp_path / "demo_1_info.txt", files=files)
+    text = open(path, encoding="utf-8").read()
+    assert "File name:                   demo_1.sim" in text and "Duration:                    0.2 s" in text
+    assert "Crosstalk:                   yes (dye 1 -> channel 2 = 0.05)" in text
+    assert "Direct excitation:           yes (laser 1 -> dye 2 = 0.1)" in text
+
+
+def test_check_rates_include_crosstalk():
+    pytest.importorskip("tkinter")
+    from pamsim.gui import check_settings
+    from pamsim.planner import apply_crosstalk
+
+    def expected(s):
+        msg = [m for lvl, m in check_settings(s) if "Expected" in m][0]
+        return np.array([float(x) for x in msg.split(":")[1].split("kHz")[0].split(",")])
+    s = small(sim_time=1.0, frames=1, species=[Species(D=20, N=60, color=2, brightness=[100, 0, 0, 0]),
+                                                Species(D=20, N=60, color=2, brightness=[0, 100, 0, 0])])
+    before = expected(s)
+    for sp in s.species:
+        apply_crosstalk(sp, s.freq, {"1→2": 0.1}, {"1→2": 0.2})
+    est = expected(s)
+    assert abs(est[0] / before[0] - 1) < 0.01 and est[1] > before[1] * 1.25
+    got = np.array(simulate(s).count_rates_khz()[:2])
+    assert np.all(np.abs(got / est - 1) < 0.2), (got, est)
+
+
+def test_planner_migration(tmp_path):
+    pytest.importorskip("openpyxl")
+    import subprocess
+    from openpyxl import load_workbook
+    from pamsim.planner import read_planner
+    make = [sys.executable, os.path.join(PLANNER_DIR, "make_planner.py")]
+    old, new = tmp_path / "old.xlsx", tmp_path / "new.xlsx"
+    subprocess.run(make + ["-o", str(old)], check=True, capture_output=True)
+    wb = load_workbook(old)
+    wb["Crosstalk & direct exc"]["D4"] = "Yes"
+    wb["Simulations"]["B5"] = "renamed"
+    wb.save(old)
+    subprocess.run(make + ["--from", str(old), "--species", "2", "-o", str(new)], check=True, capture_output=True)
+    a, b = read_planner(old), read_planner(new)
+    assert [r.sim_id for r in a] == [r.sim_id for r in b] and b[1].settings.name == "renamed"
+    for ra, rb in zip(a, b):
+        assert ra.settings.to_dict() == rb.settings.to_dict() and ra.crosstalk == rb.crosstalk
+        assert (ra.folder, ra.purpose, ra.nfiles) == (rb.folder, rb.purpose, rb.nfiles)
+    assert b[0].extras == "crosstalk"

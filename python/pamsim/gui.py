@@ -23,7 +23,8 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 
 from .params import SimSettings, Species
-from .simulate import SimulationCancelled, simulate
+from .report import species_brightness
+from .simulate import SimulationCancelled, _crosstalk, simulate
 
 APP = "PAMsim"
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
@@ -94,6 +95,10 @@ HELP_TEXT = """How to simulate data for PAM
 Very large simulations are split into <name>_part01.sim, _part02.sim, ...:
 select all parts together when loading them in PAM.
 
+Next to every file PAMsim writes <name>_1_info.txt, a text summary of the
+parameters (duration, microtime range, background, FRET, crosstalk, direct
+excitation, and D, concentration, brightness and lifetime of every species).
+
 Units: nm (sizes), um^2/s (D), kHz (brightness, noise, frequency),
 ns (lifetime, microtime range), ps (IRF width), 1/ms (dynamic rates)."""
 
@@ -161,6 +166,22 @@ def _emission_volume(p_max, wr, wz, is3d):
     return float(np.trapezoid(p * dv, u)) if hasattr(np, "trapezoid") else float(np.trapz(p * dv, u))
 
 
+def _add_expected_rates(rates, sp, freq, vol_nm3, is3d):
+    """Add the expected count rate per channel [kHz] of one species, incl. saturation, crosstalk and
+    direct excitation (FRET ignored): every laser excites every dye in its own focus (ExP[dye, laser]),
+    and the photons of a dye are spread over the channels like in the kernel (Cross, DetP)."""
+    exc = sp.excitation_matrix(freq)
+    cross = _crosstalk(sp)
+    for d in range(sp.color):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            to_chan = np.nan_to_num(cross[:, d] / cross[:, d].sum() * sp.DetP[:, d], nan=0.0, posinf=0.0)
+        for laser in range(sp.color):
+            p = float(exc[d, laser])
+            wr, wz = float(sp.wr[laser]), float(sp.wz[laser])
+            if p > 0 and wr > 0 and wz > 0:
+                rates += sp.N / vol_nm3 * freq * _emission_volume(p, wr, wz, is3d) * to_chan
+
+
 def check_settings(s: SimSettings, folder=None):
     """Plausibility checks shown in the GUI: list of (level, message)."""
     msgs = []
@@ -176,7 +197,8 @@ def check_settings(s: SimSettings, folder=None):
     vol_nm3 = np.prod(box if is3d else box[:2])
     rates = np.zeros(4)
     for sp in s.species:
-        bright = sp.brightness if sp.brightness is not None else np.diag(sp.ExP) * freq
+        bright = species_brightness(sp, freq)
+        _add_expected_rates(rates, sp, freq, vol_nm3, is3d)
         for c in range(sp.color):
             b = float(bright[c])
             if b <= 0:
@@ -189,9 +211,6 @@ def check_settings(s: SimSettings, folder=None):
             elif ratio > 0.1:
                 msgs.append(("warn", f"{sp.name}: brightness {b:g} kHz (colour {c + 1}) is {100 * ratio:.0f}% of "
                                      f"the sampling frequency; the focus starts to saturate (keep < 10%)."))
-            wr, wz = float(sp.wr[c]), float(sp.wz[c])
-            if wr > 0 and wz > 0:
-                rates[c] += sp.N / vol_nm3 * freq * _emission_volume(ratio, wr, wz, is3d)
         if sp.D > 0:
             step = np.sqrt(2 * sp.D * 1e6 / (freq * 1e3))
             wr_min = float(np.min(sp.wr[:sp.color]))
@@ -749,7 +768,7 @@ class SimGUI:
         self.fret_cb.current(sp.fret - 1)
         self.barrier_cb.current(sp.barrier - 1)
         self.use_lt.set(bool(sp.use_lt))
-        bright = sp.brightness if sp.brightness is not None else np.diag(sp.ExP) * self.settings.freq
+        bright = species_brightness(sp, self.settings.freq)
         cols = [bright, sp.wr, sp.wz, sp.dX, sp.dY, sp.dZ, sp.LT, sp.aniso[:, 0], sp.aniso[:, 1], sp.aniso[:, 2]]
         for i in range(4):
             for j, c in enumerate(cols):
@@ -792,8 +811,8 @@ class SimGUI:
             self.mcol_lbl[i].configure(text=f"{clab} {i + 1}")
             for j in range(4):
                 self.mvars[i][j].set(_fmt(m[i, j]))
-        notes = {"ExP": "The diagonal is set by the Brightness column; off-diagonal entries are direct excitation "
-                        "of a dye by another laser (relative to its own laser).",
+        notes = {"ExP": "Excitation probability per time step in the focus centre. The diagonal is set by the Brightness "
+                        "column; off-diagonal entries are direct excitation of a dye by another laser.",
                  "Cross": "Relative crosstalk of a dye's photons into other channels (the diagonal is always 1).",
                  "DetP": "Probability (0..1) that an emitted photon of a dye is detected in a channel.",
                  "BlP": "Probability per emitted photon that the dye bleaches (it recovers when leaving the box)."}
@@ -1175,6 +1194,8 @@ class SimGUI:
         if save_json:
             save_setup(s, base + "_setup.json", seed=r.seed)
             written.append(base + "_setup.json")
+        # plain-text summary of the parameters, always written next to the data
+        written.append(r.save_info(base + "_info.txt", files=list(written), sim_id=label))
         rates = ", ".join(f"{x:.3g}" for x in r.count_rates_khz() if x > 0) or "0"
         q.put(("log", f"{os.path.basename(base)}: {r.elapsed:.1f} s, "
                       f"{sum(len(m) for m in r.macrotimes) / 1e6:.3g} M photons, rates [kHz] {rates}\n"
@@ -1211,7 +1232,8 @@ class SimGUI:
             self.v["folder"].set(row.folder)
         elif row.folder:
             self._log(f"planner folder not found on this computer, keeping {self.v['folder'].get()}:\n  {row.folder}")
-        self._log(f"loaded {row.sim_id} ({row.settings.name}) from the planner")
+        self._log(f"loaded {row.sim_id} ({row.settings.name}) from the planner"
+                  + (f" with {row.extras}" if row.extras != "-" else ""))
 
     def _run_planner_rows(self, rows):
         if self.worker is not None and self.worker.is_alive():
@@ -1328,9 +1350,9 @@ class PlannerDialog:
         w.transient(gui.root)
         ttk.Label(w, text="Select one simulation to load it into the editor, or several (Ctrl / Shift + click) "
                           "to run them one after another.", style="Hint.TLabel").pack(anchor="w", padx=10, pady=(10, 4))
-        cols = ("id", "name", "species", "time", "status", "check", "purpose")
-        heads = ("Sim ID", "File name", "Species", "Duration [s]", "Status", "Check", "Purpose")
-        widths = (60, 230, 60, 80, 80, 300, 300)
+        cols = ("id", "name", "species", "time", "extras", "status", "check", "purpose")
+        heads = ("Sim ID", "File name", "Species", "Duration [s]", "Crosstalk / dir. exc.", "Status", "Check", "Purpose")
+        widths = (60, 230, 60, 80, 150, 80, 300, 300)
         frame = ttk.Frame(w)
         frame.pack(fill="both", expand=True, padx=10)
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended", height=14)
@@ -1347,7 +1369,7 @@ class PlannerDialog:
             tag = "bad" if r.check.startswith("\u2716") else "warn" if r.check.startswith("\u26a0") else ""
             self.tree.insert("", "end", iid=str(i), tags=(tag,), values=(
                 r.sim_id, r.settings.name, len(r.settings.species), f"{r.settings.sim_time:g}",
-                r.status, r.check, r.purpose))
+                r.extras, r.status, r.check, r.purpose))
         self.tree.bind("<Double-1>", lambda e: self._load())
         b = ttk.Frame(w)
         b.pack(fill="x", padx=10, pady=10)

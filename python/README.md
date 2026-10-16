@@ -97,6 +97,12 @@ The window is organised in three steps:
 * The last setup and output folder are restored at the next start.  *Save /
   Open setup* store setups as JSON, and setups saved by Sim.m open too.
 
+Next to every file PAMsim writes `<name>_<k>_info.txt`, a plain-text summary of
+the parameters (duration, microtime range, background, FRET with R0 / R,
+crosstalk, direct excitation, and D, concentration, brightness and lifetime of
+every species), plus seed, run time and measured count rates.  From a script:
+`r.save_info("my_simulation_1_info.txt", files=r.save_sim("my_simulation_1.sim"))`.
+
 Each simulation is written into its own folder `<output folder>/<name>/`
 (option *Own folder per simulation*, on by default). Files are named like in
 Sim.m (`<name>_1.sim`, `<name>_2.sim`, ...; with a seed, file *k* uses seed + k − 1) and open in PAM via *Load TCSPC data → Pam
@@ -172,7 +178,7 @@ inputs built directly from the Sim.m source, and compares them with pamsim:
 ```bash
 python validation/compare_kernels.py     # 9 scenarios, original vs pamsim
 python validation/check_fcs.py           # FCS fit vs theory, pamsim and original
-python -m pytest                         # 23 tests (~1 min)
+python -m pytest                         # 29 tests (~1 min)
 ```
 
 * **Simulation**: the comparison covers 1 colour; 2-colour PIE with static
@@ -233,6 +239,8 @@ pamsim/simulate.py     Do_PointSim: input preparation, threads, noise, channels
 pamsim/params.py       SimSettings / Species (Sim.m parameters)
 pamsim/correlation.py  CrossCorrelation.m + Do_CCF.c
 pamsim/io.py           .sim / .npz output, IRF and scatter files
+pamsim/report.py       <name>_<k>_info.txt summary written after every simulation
+pamsim/planner.py      reads the Excel planner (incl. the crosstalk / direct excitation sheet)
 pamsim/gui.py          PAMsim window (tkinter + sv-ttk theme): presets, live checks
 pamsim/shortcut.py     creates the Desktop / Start menu shortcuts
 PAMsim.pyw             double-click launcher (no console window)

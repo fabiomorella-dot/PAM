@@ -30,9 +30,23 @@ It calculates FRET efficiencies, concentrations, expected count rates, photons
 and memory, and flags saturating brightness or too coarse time steps before
 you run anything.
 
+Crosstalk and direct excitation are an optional extra on their own sheet,
+**Crosstalk & direct exc**: one row per simulation (pick its Sim ID), switch
+*Crosstalk?* and/or *Direct exc.?* to *Yes* and give the values as fractions
+(1→2, 1→3, 2→3).  Simulations not listed there, or switched to *No*, are
+simulated without them.  PAMsim reads both sheets from the same file.
+
 In PAMsim, **Load from planner...** opens the planner: double-click a
 simulation to load it into the editor, or select several and press **Run
 selected** to simulate them one after another.
+
+## Info file of every simulation
+
+When a file is finished PAMsim writes `<name>_1_info.txt` next to
+`<name>_1.sim`: file name, duration, microtime range, background, number of
+species, FRET (with R0 and R), crosstalk and direct excitation, and per
+species its name, colours, diffusion coefficient, concentration, brightness and
+lifetime (numbered per colour when the species carries several dyes).
 
 A fresh planner (for example with more species blocks) is made with
 `planning/make_planner.py` – in a terminal in the `planning` folder:
@@ -42,9 +56,13 @@ python make_planner.py -o my_planner.xlsx              # new planner with exampl
 python make_planner.py --empty -o my_planner.xlsx      # without the examples
 python make_planner.py --species 10 -o my_planner.xlsx # 10 species blocks per simulation
 python make_planner.py --rows 200 -o my_planner.xlsx   # 200 simulation rows
+python make_planner.py --from old.xlsx -o new.xlsx     # newest layout, your simulations copied from old.xlsx
 ```
 
-It never overwrites an existing file unless you add `--force`.
+It never overwrites an existing file unless you add `--force`.  `--from` is
+the way to bring a planner you have already filled in to the newest layout
+(e.g. to get the crosstalk sheet): it copies every input cell by its column
+name and leaves the old file untouched.
 
 **`planning/PAMsim_planner_guide.docx`** explains every column (required or optional,
 units, defaults), running the simulations from PAMsim, the checks, and

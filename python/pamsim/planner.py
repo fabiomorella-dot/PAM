@@ -4,6 +4,11 @@ The planner has one row per simulation on the sheet "Simulations": band
 titles in row 1 ("Measurement", "Species 1", ...), column headers in row 3,
 data from row 4.  Columns are found by their header text, so the planner
 may be rearranged or extended (more species blocks) without breaking this.
+
+The optional sheet "Crosstalk & direct exc" has the same layout and one row
+per simulation (matched by Sim ID).  Its values are only used when the row's
+switch "Crosstalk?" / "Direct exc.?" is Yes; planners without this sheet
+simulate without crosstalk and direct excitation, as before.
 """
 
 from __future__ import annotations
@@ -15,12 +20,15 @@ from .params import SimSettings, Species
 SCAN = {"point": 1, "raster scan": 2, "line scan": 3, "circle scan": 4}
 FRET = {"no fret": 1, "static fret": 2, "dynamic fret": 3}
 FORMAT = {".sim": 0, ".npz": 1, "both": 2}
+#: (bluer colour, redder colour) pairs of the crosstalk sheet, 0-based
+PAIRS = {"1→2": (0, 1), "1→3": (0, 2), "2→3": (1, 2)}
 
 
 class PlannerRow:
     """One simulation of the planner."""
 
-    def __init__(self, sim_id, settings, folder, nfiles, fmt, purpose, status, check):
+    def __init__(self, sim_id, settings, folder, nfiles, fmt, purpose, status, check,
+                 crosstalk=None, direct_excitation=None):
         self.sim_id = sim_id
         self.settings = settings
         self.folder = folder
@@ -29,6 +37,15 @@ class PlannerRow:
         self.purpose = purpose
         self.status = status
         self.check = check
+        #: values in effect, e.g. {"1→2": 0.05}; empty = switched off
+        self.crosstalk = crosstalk or {}
+        self.direct_excitation = direct_excitation or {}
+
+    @property
+    def extras(self):
+        """Short label: which of crosstalk / direct excitation are switched on."""
+        on = [n for n, d in (("crosstalk", self.crosstalk), ("direct exc.", self.direct_excitation)) if d]
+        return " + ".join(on) if on else "-"
 
     def __repr__(self):
         return f"PlannerRow({self.sim_id!r}, {self.settings.name!r}, {len(self.settings.species)} species)"
@@ -61,12 +78,75 @@ def _columns(ws):
     return cols
 
 
+def _read_crosstalk_sheet(wb):
+    """Sim ID -> (crosstalk, direct excitation) from the optional crosstalk sheet.
+
+    Each is a dict like {"1→2": 0.05} with the pairs that are switched on and
+    non-zero; a switch that is not "Yes" gives an empty dict.  If a Sim ID is
+    listed twice, the first row counts (as in the planner's formulas).
+    """
+    name = next((n for n in wb.sheetnames if n.lower().startswith("crosstalk")), None)
+    if name is None:
+        return {}
+    ws = wb[name]
+    cols = {head: c for (_, head), c in _columns(ws).items()}
+    if "Sim ID" not in cols:
+        return {}
+    out = {}
+    for vals in ws.iter_rows(min_row=4, values_only=True):
+        def g(head):
+            c = cols.get(head)
+            return None if c is None or c - 1 >= len(vals) else vals[c - 1]
+
+        sim_id = _text(g("Sim ID"))
+        if not sim_id or sim_id in out:
+            continue
+        found = []
+        for switch, prefix in (("Crosstalk?", "Crosstalk"), ("Direct exc.?", "Direct exc.")):
+            on = _text(g(switch)).lower() == "yes"
+            values = {pair: _num(g(f"{prefix} {pair}"), 0.0) or 0.0 for pair in PAIRS} if on else {}
+            found.append({pair: v for pair, v in values.items() if v > 0})
+        out[sim_id] = tuple(found)
+    return out
+
+
+def apply_crosstalk(species, freq, crosstalk=None, direct_excitation=None):
+    """Put crosstalk and direct excitation (fractions, keys "1→2", "1→3", "2→3") into a species.
+
+    * crosstalk "1→2" = photons of dye 1 in channel 2 relative to channel 1
+      (``Cross[1, 0]``, Sim.m's relative crosstalk);
+    * direct excitation "1→2" = excitation of dye 2 by laser 1 relative to its
+      excitation by its own laser 2 (``ExP[1, 0] = value * ExP[1, 1]``).
+
+    The brightness keeps its meaning (count rate of a dye in its own channel).
+    ``ExP`` is stored with the diagonal that this brightness gives, so
+    :meth:`Species.excitation_matrix` leaves the direct excitation unchanged,
+    also for species without the exciting laser's own dye.  Pairs with a colour
+    above ``species.color`` are ignored.
+    """
+    cross = np.eye(4)
+    for pair, v in (crosstalk or {}).items():
+        dye, chan = PAIRS[pair]
+        if chan < species.color:
+            cross[chan, dye] = v
+    species.Cross = cross
+    species.ExP = np.eye(4)
+    exp_ = species.excitation_matrix(freq)  # diagonal from the brightness (incl. the crosstalk)
+    for pair, v in (direct_excitation or {}).items():
+        laser, dye = PAIRS[pair]
+        if dye < species.color:
+            exp_[dye, laser] = v * exp_[dye, dye]
+    species.ExP = exp_
+    return species
+
+
 def read_planner(path):
     """Return a list of :class:`PlannerRow`, one per filled simulation row."""
     from openpyxl import load_workbook
     wb = load_workbook(path, data_only=True, read_only=True)
     if "Simulations" not in wb.sheetnames:
         raise ValueError("this file has no 'Simulations' sheet - is it a PAMsim planner?")
+    extra = _read_crosstalk_sheet(wb)
     ws = wb["Simulations"]
     cols = _columns(ws)
     by_header = {}
@@ -146,10 +226,17 @@ def read_planner(path):
             irf_width=_num(g("IRF width [ps]"), 250.0),
             species=species or [Species(color=ncol, wr=wr + [wr[-1]], wz=wz + [wz[-1]])],
         )
+        # crosstalk / direct excitation (optional sheet); only pairs within the colours of the setup
+        ct, de = extra.get(sim_id, ({}, {}))
+        ct = {k: v for k, v in ct.items() if PAIRS[k][1] < ncol}
+        de = {k: v for k, v in de.items() if PAIRS[k][1] < ncol}
+        if ct or de:
+            for sp in settings.species:
+                apply_crosstalk(sp, settings.freq, ct, de)
         out.append(PlannerRow(
             sim_id=sim_id, settings=settings, folder=_text(g("Output folder")),
             nfiles=int(_num(g("Number of files"), 1) or 1), fmt=FORMAT.get(_text(g("Format")).lower(), 0),
             purpose=_text(g("Purpose / question")), status=_text(g("Status")),
-            check=_text(g("Check")),
+            check=_text(g("Check")), crosstalk=ct, direct_excitation=de,
         ))
     return out

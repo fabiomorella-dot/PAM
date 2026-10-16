@@ -7,6 +7,7 @@ Usage (in a terminal, inside the "planning" folder):
     python make_planner.py --species 10            # 10 species blocks per simulation instead of 6
     python make_planner.py -o my_project.xlsx      # choose the file name
     python make_planner.py --rows 200              # prepare 200 simulation rows instead of 60
+    python make_planner.py --from old.xlsx -o new.xlsx   # new layout, your simulations copied from old.xlsx
 
 An existing file is never overwritten unless you add --force.
 Needs:  python -m pip install openpyxl
@@ -31,14 +32,53 @@ _ap.add_argument("--species", type=int, default=6, help="species blocks per simu
 _ap.add_argument("--rows", type=int, default=60, help="simulation rows prepared (default 60)")
 _ap.add_argument("--empty", action="store_true", help="no example rows")
 _ap.add_argument("--force", action="store_true", help="overwrite an existing file")
+_ap.add_argument("--from", dest="source", metavar="OLD.xlsx",
+                 help="copy all input cells (simulations, species, crosstalk sheet) from an existing planner "
+                      "into the new layout instead of the example rows")
 ARGS = _ap.parse_args()
 if os.path.exists(ARGS.output) and not ARGS.force:
     sys.exit(f"{ARGS.output} already exists - choose another name with -o, or add --force to overwrite it.")
+if ARGS.source and os.path.abspath(ARGS.source) == os.path.abspath(ARGS.output):
+    sys.exit("--from and -o must be different files (the old planner is never changed).")
 
-MAX_SPECIES = max(1, ARGS.species)
-N_ROWS = max(1, ARGS.rows)       # simulation rows prepared
+
+def read_old_planner(path):
+    """Input values of an existing planner: {"sim": [row, ...], "xs": [row, ...], "species": n}.
+
+    A row maps (band title, header) -> value; formulas are skipped.  Rows without a Sim ID are left out.
+    """
+    from openpyxl import load_workbook
+    wb = load_workbook(path, read_only=True)
+    out = {"sim": [], "xs": [], "species": 0}
+    for key, name in (("sim", "Simulations"), ("xs", next((n for n in wb.sheetnames
+                                                           if n.lower().startswith("crosstalk")), None))):
+        if name not in wb.sheetnames:
+            continue
+        rows = list(wb[name].iter_rows(values_only=True))
+        if len(rows) < 4:
+            continue
+        band, heads = "", []
+        for b, hd in zip(rows[0], rows[2]):
+            band = str(b).strip() if b not in (None, "") else band
+            heads.append((band, str(hd).strip()) if hd not in (None, "") else None)
+        if key == "sim":
+            out["species"] = len({b for b, _ in filter(None, heads) if b.startswith("Species ")})
+        for vals in rows[3:]:
+            rec = {hd: v for hd, v in zip(heads, vals)
+                   if hd and v not in (None, "") and not (isinstance(v, str) and v.startswith("="))}
+            if any(h == "Sim ID" for _, h in rec):
+                out[key].append(rec)
+    wb.close()
+    return out
+
+
+OLD = read_old_planner(ARGS.source) if ARGS.source else None
+MAX_SPECIES = max(1, ARGS.species, OLD["species"] if OLD else 0)
+N_ROWS = max(1, ARGS.rows, len(OLD["sim"]) + 20 if OLD else 0)  # simulation rows prepared
 FIRST, LAST = 4, 4 + N_ROWS - 1  # data rows (rows 1-3: bands and headers)
 OUT = ARGS.output
+XS_NAME = "Crosstalk & direct exc"  # optional sheet: crosstalk and direct excitation per simulation
+XS = f"'{XS_NAME}'!"
 
 F = "Arial"
 HDR = PatternFill("solid", fgColor="1F3A5F")
@@ -76,6 +116,9 @@ lines = [
     ("•  Grey cells are calculated: concentration, FRET efficiency, a check per species, expected count rates, photons, memory.", None),
     ("•  Use the + / - buttons above the columns (Excel grouping) to fold species blocks away.", None),
     ("•  Fix every red check before running a simulation; orange checks bias the results slightly.", None),
+    (f"•  Optional: crosstalk and direct excitation are on the separate sheet '{XS_NAME}' (off unless you switch them on).", None),
+    ("    One row per simulation: pick its Sim ID, set 'Crosstalk?' and/or 'Direct exc.?' to Yes and give the values as fractions.", None),
+    ("    Simulations that are not listed there (or have both switches on No) are simulated without crosstalk and direct excitation.", None),
     ("•  Empty cells are treated like in PAMsim: box 5000 nm, 1000 kHz, 10 s, 1 colour, wr 200 nm, wz 1000 nm, R0 63/51/68.", None),
     ("", None),
     ("Colour code", Font(name=F, size=12, bold=True)),
@@ -87,12 +130,13 @@ lines = [
     ("•  One diffusion step sqrt(2·D·dt) should be < 10% of wr; otherwise raise the sampling frequency.", None),
     ("•  Box >= 8·wr laterally and >= 3·wz axially.", None),
     ("•  Memory ≈ 12 bytes per photon and file. For very long runs use several files (Number of files) instead.", None),
-    ("•  Expected count rates: Gaussian focus incl. saturation (as in PAMsim's Check panel). FRET and crosstalk are ignored,", None),
-    ("    so with FRET the donor channel gets fewer and the acceptor channel more photons than estimated.", None),
+    ("•  Expected count rates: Gaussian focus incl. saturation (as in PAMsim's Check panel), plus crosstalk and direct excitation", None),
+    ("    when they are switched on. FRET is ignored, so with FRET the donor channel gets fewer and the acceptor channel more photons.", None),
     ("", None),
     ("Units", Font(name=F, size=12, bold=True)),
     ("nm (box, wr, wz) · kHz (sampling frequency, brightness, background) · s (duration) · ns (lifetime, microtime range)", None),
     ("µm²/s (D) · nM (concentration) · Å or nm for R0 and R (use the same unit for both) · kHz (count rates) · million photons · GB", None),
+    ("Crosstalk and direct excitation: fractions without unit (0.05 = 5 %).", None),
     ("", None),
     ("Example rows", Font(name=F, size=12, bold=True)),
     ("S00 is a worked example (realistic 3-colour FCCS mixture with a FRET pair). S01-S11 are the simulations from your earlier", None),
@@ -105,7 +149,7 @@ for i, (t, f) in enumerate(lines, start=1):
     c.font = f or Font(name=F, size=10)
 h.column_dimensions["A"].width = 3
 h.column_dimensions["B"].width = 125
-h["B16"].fill = INPUT
+h.cell(row=next(i for i, (t, _) in enumerate(lines, start=1) if t.startswith("Yellow cells")), column=2).fill = INPUT
 h.sheet_view.showGridLines = False
 
 # ====================================================================== Column guide
@@ -141,11 +185,20 @@ GUIDE = [
     ("R 1→2, 1→3, 2→3", "Dye distance for FRET between two colours; only dyes with brightness > 0 take part", "Å or nm", "Optional", "no FRET for this pair"),
     ("E, Conc., Check (grey)", "FRET efficiency 1/(1+(R/R0)^6), concentration, check of the species", "-, nM", "Calculated", "-"),
     ("Totals, output and results", None, None, None, None),
-    ("Exp. rates, Photons, Memory, Check (grey)", "Expected count rate per channel (incl. saturation), photons and memory per file, overall check", "kHz, M, GB", "Calculated", "-"),
+    ("Exp. rates, Photons, Memory (grey)", "Expected count rate per channel (incl. saturation, crosstalk and direct excitation), photons and memory per file", "kHz, M, GB", "Calculated", "-"),
+    ("Crosstalk / dir. exc. (grey)", f"Shows whether crosstalk and/or direct excitation are switched on for this simulation (sheet '{XS_NAME}')", "-", "Calculated", "-"),
+    ("Check (grey)", "Overall check of the simulation", "-", "Calculated", "-"),
     ("Number of files", "Independent repeats with the same parameters", "-", "Optional", "1"),
     ("Seed", "Random seed; file k uses seed + k - 1", "-", "Optional", "random"),
     ("Format", ".sim (PAM) / .npz / both", "-", "Optional", ".sim"),
     ("Date run ... Result notes", "Your notes after running and analysing", "-", "Not used", "-"),
+    (f"Sheet '{XS_NAME}' (optional - one row per simulation; not listed = off)", None, None, None, None),
+    ("Sim ID", "Sim ID of a simulation on the Simulations sheet (drop-down). File name and Colours are looked up (grey)", "-", "Required", "row is ignored"),
+    ("Crosstalk?", "Yes = use the crosstalk values of this row", "-", "Optional", "No (no crosstalk)"),
+    ("Crosstalk 1→2, 1→3, 2→3", "Photons of dye 1 (2) detected in channel 2 (3), as a fraction of that dye's photons in its own channel", "fraction", "Optional", "0"),
+    ("Direct exc.?", "Yes = use the direct excitation values of this row", "-", "Optional", "No (no direct excitation)"),
+    ("Direct exc. 1→2, 1→3, 2→3", "Excitation of dye 2 (3) by laser 1 (2), as a fraction of its excitation by its own laser", "fraction", "Optional", "0"),
+    ("Check (grey)", "on / off, and warnings (unknown Sim ID, too few colours, values > 1, ...)", "-", "Calculated", "-"),
 ]
 gs = wb.create_sheet("Column guide")
 for j, (hd, w) in enumerate((("Column", 34), ("Meaning", 70), ("Unit", 11), ("Required?", 12), ("If left blank", 26)), start=1):
@@ -165,7 +218,7 @@ for i, row in enumerate(GUIDE, start=2):
         if j == 4 and v == "Required":
             c.fill = PatternFill("solid", fgColor="FDE2E2")
 gs.freeze_panes = "A2"
-gs.cell(row=len(GUIDE) + 3, column=1, value="Not in the planner (set them in PAMsim after 'Load into editor'): crosstalk, "
+gs.cell(row=len(GUIDE) + 3, column=1, value="Not in the planner (set them in PAMsim after 'Load into editor'): "
         "detection efficiency, bleaching, anisotropy, dynamic FRET rates, barrier maps.").font = Font(name=F, italic=True, size=10)
 gs.cell(row=len(GUIDE) + 4, column=1, value="Full explanation: planning/PAMsim_planner_guide.docx").font = Font(name=F, italic=True, size=10)
 
@@ -232,7 +285,9 @@ for sidx in range(1, MAX_SPECIES + 1):
 for k, hd, w, com in (("nsp", "Species used", 8, None), ("ntot", "Total molecules", 9, None),
                       ("r1", "Exp. rate ch1 [kHz]", 9, None), ("r2", "Exp. rate ch2 [kHz]", 9, None),
                       ("r3", "Exp. rate ch3 [kHz]", 9, None), ("ph", "Photons per file [M]", 9, None),
-                      ("mem", "Memory per file [GB]", 9, None), ("check", "Check", 40, None)):
+                      ("mem", "Memory per file [GB]", 9, None),
+                      ("xs", "Crosstalk / dir. exc.", 11, f"Switched on for this simulation on the sheet '{XS_NAME}'"),
+                      ("check", "Check", 40, None)):
     add(k, hd, w, "chk", "Totals and checks (automatic)", "calc", com)
 add("nfiles", "Number of files", 8, "out", "Output")
 add("seed", "Seed", 8, "out", "Output", comment="Empty = random")
@@ -243,34 +298,71 @@ for k, hd, w in (("date", "Date run", 10), ("runtime", "Run time [min]", 8), ("f
 
 C = {c[0]: L(i + 1) for i, c in enumerate(cols)}
 
-# ---- band row (1), sub-band row (2: species titles are in row 1 already), header row (3)
-i = 0
-while i < len(cols):
-    band, title = cols[i][3], cols[i][4]
-    j = i
-    while j + 1 < len(cols) and cols[j + 1][3] == band:
-        j += 1
-    color = SP_BAND[(int(band[2:]) - 1) % len(SP_BAND)] if band.startswith("sp") else BAND[band]
-    s.merge_cells(start_row=1, start_column=i + 1, end_row=2, end_column=j + 1)
-    c = s.cell(row=1, column=i + 1, value=title)
-    c.font = Font(name=F, size=11, bold=True, color="FFFFFF")
-    c.alignment = Alignment(horizontal="center", vertical="center")
-    for k in range(i + 1, j + 2):
-        for rr in (1, 2):
-            s.cell(row=rr, column=k).fill = PatternFill("solid", fgColor=color)
-    if band.startswith("sp"):  # outline group so species blocks can be folded
-        s.column_dimensions.group(L(i + 1), L(j + 1), outline_level=1, hidden=False)
-    i = j + 1
-for idx, (k, hd, w, band, title, kind, com) in enumerate(cols, start=1):
-    c = s.cell(row=3, column=idx, value=hd)
-    c.fill = HDR; c.font = WHITE_B; c.border = BOX
-    c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    if com:
-        c.comment = Comment(com, "PAMsim planner")
-    s.column_dimensions[L(idx)].width = w
-s.row_dimensions[3].height = 40
+
+
+def draw_header(ws, cols):
+    """Band row (1, merged with row 2) and header row (3) of a planner sheet."""
+    i = 0
+    while i < len(cols):
+        band, title = cols[i][3], cols[i][4]
+        j = i
+        while j + 1 < len(cols) and cols[j + 1][3] == band:
+            j += 1
+        color = SP_BAND[(int(band[2:]) - 1) % len(SP_BAND)] if band.startswith("sp") else BAND[band]
+        ws.merge_cells(start_row=1, start_column=i + 1, end_row=2, end_column=j + 1)
+        c = ws.cell(row=1, column=i + 1, value=title)
+        c.font = Font(name=F, size=11, bold=True, color="FFFFFF")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        for k in range(i + 1, j + 2):
+            for rr in (1, 2):
+                ws.cell(row=rr, column=k).fill = PatternFill("solid", fgColor=color)
+        if band.startswith("sp"):  # outline group so species blocks can be folded
+            ws.column_dimensions.group(L(i + 1), L(j + 1), outline_level=1, hidden=False)
+        i = j + 1
+    for idx, (k, hd, w, band, title, kind, com) in enumerate(cols, start=1):
+        c = ws.cell(row=3, column=idx, value=hd)
+        c.fill = HDR; c.font = WHITE_B; c.border = BOX
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        if com:
+            c.comment = Comment(com, "PAMsim planner")
+        ws.column_dimensions[L(idx)].width = w
+    ws.row_dimensions[3].height = 40
+
+
+draw_header(s, cols)
 s.freeze_panes = f"{C['purpose']}{FIRST}"
 s.sheet_properties.outlinePr.summaryRight = False
+
+# ====================================================================== crosstalk / direct excitation sheet
+xs = wb.create_sheet(XS_NAME)
+xcols = []
+XPAIRS = (("12", 2), ("13", 3), ("23", 3))  # pair, colours needed
+xcols.append(("id", "Sim ID", 8, "xid", "Simulation", "in",
+              "Pick the Sim ID of a simulation on the Simulations sheet (drop-down). One row per simulation. "
+              "Simulations not listed here have no crosstalk and no direct excitation."))
+xcols.append(("name", "File name", 30, "xid", "Simulation", "calc", "Looked up from the Simulations sheet"))
+xcols.append(("ncol", "Colours", 8, "xid", "Simulation", "calc", "Looked up from the Simulations sheet"))
+xcols.append(("ct", "Crosstalk?", 10, "xct", "Crosstalk (dye → channel)", "in",
+              "Yes = simulate the crosstalk of this row. No / empty = no crosstalk (the values are kept but ignored)."))
+for pair, _ in XPAIRS:
+    xcols.append((f"ct{pair}", f"Crosstalk {pair[0]}→{pair[1]}", 10, "xct", "Crosstalk (dye → channel)", "in",
+                  f"Photons of dye {pair[0]} detected in channel {pair[1]}, as a fraction of the photons of dye {pair[0]} "
+                  f"in its own channel {pair[0]} (e.g. 0.05 = 5 %). Write a fraction, not a percentage."
+                  if pair == "12" else None))
+xcols.append(("de", "Direct exc.?", 10, "xde", "Direct excitation (laser → dye)", "in",
+              "Yes = simulate the direct excitation of this row. No / empty = no direct excitation."))
+for pair, _ in XPAIRS:
+    xcols.append((f"de{pair}", f"Direct exc. {pair[0]}→{pair[1]}", 10, "xde", "Direct excitation (laser → dye)", "in",
+                  f"Excitation of dye {pair[1]} by laser {pair[0]}, as a fraction of its excitation by its own laser "
+                  f"{pair[1]} (e.g. 0.05: under laser {pair[0]} dye {pair[1]} is 5 % as bright as under laser {pair[1]}). "
+                  f"Only species that carry dye {pair[1]} (brightness > 0) are affected." if pair == "12" else None))
+xcols.append(("check", "Check", 46, "chk", "Check (automatic)", "calc", None))
+BAND.update({"xid": "2A78D6", "xct": "1B6F8A", "xde": "8A5A1B"})
+XC = {c[0]: L(i + 1) for i, c in enumerate(xcols)}
+draw_header(xs, xcols)
+xs.freeze_panes = f"B{FIRST}"
+XR = lambda k: f"{XS}${XC[k]}${FIRST}:${XC[k]}${LAST}"  # noqa: E731  absolute column range on the crosstalk sheet
+SR = lambda k: f"Simulations!${C[k]}${FIRST}:${C[k]}${LAST}"  # noqa: E731  same on the Simulations sheet
 
 # ====================================================================== hidden calculation sheet
 calc = wb.create_sheet("Calc")
@@ -282,6 +374,12 @@ for sidx in range(1, MAX_SPECIES + 1):
         CC[(sidx, k)] = L(cc)
         calc.cell(row=3, column=cc, value=f"S{sidx} {k}")
         cc += 1
+# per simulation: crosstalk / direct excitation in effect, focus volumes, rates without and with them
+for k in ("xrow", "cton", "deon", "ct12", "ct13", "ct23", "de12", "de13", "de23",
+          "V1", "V2", "V3", "R1", "R2", "R3", "E2", "E3"):
+    CC[k] = L(cc)
+    calc.cell(row=3, column=cc, value=k)
+    cc += 1
 
 # ====================================================================== formulas
 DEFAULTS = {"bx": 5000, "by": 5000, "bz": 5000, "freq": 1000, "dur": 10, "ncol": 1,
@@ -349,10 +447,32 @@ for r in range(FIRST, LAST + 1):
     used_cells = ",".join(f"Calc!{CC[(i, 'used')]}{r}" for i in range(1, MAX_SPECIES + 1))
     s[f"{C['nsp']}{r}"] = f'=IF({ida}="","",SUM({used_cells}))'
     s[f"{C['ntot']}{r}"] = f'=IF({ida}="","",' + "+".join(f"N({g(f's{i}_N')})" for i in range(1, MAX_SPECIES + 1)) + ")"
+    # crosstalk / direct excitation of this simulation (0 when switched off or not listed on the crosstalk sheet)
+    K = lambda k: f"Calc!${CC[k]}{r}"  # noqa: E731
+    calc[f"{CC['xrow']}{r}"] = f'=IF({S("id")}="",0,IFERROR(MATCH({S("id")},{XR("id")},0),0))'
+    calc[f"{CC['cton']}{r}"] = f'=IF({K("xrow")}=0,0,IF(INDEX({XR("ct")},{K("xrow")})="Yes",1,0))'
+    calc[f"{CC['deon']}{r}"] = f'=IF({K("xrow")}=0,0,IF(INDEX({XR("de")},{K("xrow")})="Yes",1,0))'
+    for pair, need in XPAIRS:
+        for kind in ("ct", "de"):
+            calc[f"{CC[kind + pair]}{r}"] = (f'=IF(AND({K(kind + "on")}=1,{S("ncol")}>={need}),'
+                                             f'N(INDEX({XR(kind + pair)},{K("xrow")})),0)')
     for ch in (1, 2, 3):
-        cells = ",".join(f"Calc!{CC[(i, f'rate{ch}')]}{r}" for i in range(1, MAX_SPECIES + 1))
-        s[f"{C[f'r{ch}']}{r}"] = f'=IF({ida}="","",SUM({cells}))'
+        calc[f"{CC[f'V{ch}']}{r}"] = f"=PI()/2*{S(f'wr{ch}')}^2*IF({S('bz')}>0,SQRT(PI()/2)*{S(f'wz{ch}')},1)"
+        calc[f"{CC[f'R{ch}']}{r}"] = "=SUM(" + ",".join(f"Calc!{CC[(i, f'rate{ch}')]}{r}"
+                                                       for i in range(1, MAX_SPECIES + 1)) + ")"
+    # dye 2 / dye 3 photons incl. direct excitation by the bluer laser(s) in that laser's focus (unsaturated)
+    calc[f"{CC['E2']}{r}"] = f'={K("R2")}*(1+IF({K("V2")}>0,{K("de12")}*{K("V1")}/{K("V2")},0))'
+    calc[f"{CC['E3']}{r}"] = (f'={K("R3")}*(1+IF({K("V3")}>0,({K("de13")}*{K("V1")}+{K("de23")}*{K("V2")})'
+                              f'/{K("V3")},0))')
+    rate_f = {1: K("R1"), 2: f'{K("E2")}+{K("ct12")}*{K("R1")}',
+              3: f'{K("E3")}+{K("ct13")}*{K("R1")}+{K("ct23")}*{K("E2")}'}
+    for ch in (1, 2, 3):
+        s[f"{C[f'r{ch}']}{r}"] = f'=IF({ida}="","",{rate_f[ch]})'
         s[f"{C[f'r{ch}']}{r}"].number_format = '0.0;-0.0;"-"'
+    on_ct = f'AND({K("cton")}=1,{S("ncol")}>=2)'
+    on_de = f'AND({K("deon")}=1,{S("ncol")}>=2)'
+    s[f"{C['xs']}{r}"] = (f'=IF({ida}="","",IF(AND({on_ct},{on_de}),"Crosstalk + dir. exc.",'
+                          f'IF({on_ct},"Crosstalk",IF({on_de},"Direct exc.","–"))))')
     s[f"{C['ph']}{r}"] = (f'=IF({ida}="","",({g("r1")}+{g("r2")}+{g("r3")}+IF({g("bg")}="Yes",N({g("bgk")})*N({g("ncol")}),0))'
                           f'*1000*{g("dur")}/1000000)')
     s[f"{C['ph']}{r}"].number_format = "0.00"
@@ -361,13 +481,15 @@ for r in range(FIRST, LAST + 1):
     chks = [g(f"s{i}_chk") for i in range(1, MAX_SPECIES + 1)]
     nred = "+".join(f'(LEFT({c},1)="✖")' for c in chks)
     nor = "+".join(f'(LEFT({c},1)="⚠")' for c in chks)
+    xmsg = f'IF({K("xrow")}>0,INDEX({XR("check")},{K("xrow")}),"")'  # check of this simulation on the crosstalk sheet
     s[f"{C['check']}{r}"] = (
         f'=IF({ida}="","",IF({g("nsp")}=0,"⚠ no species entered",'
         f'IF(({nred})>0,"✖ "&({nred})&" species saturated - see the species checks",'
         f'IF(MIN({g("bx")},{g("by")})<8*MAX({g("wr1")},{g("wr2")},{g("wr3")}),"⚠ box too small laterally (< 8·wr)",'
         f'IF(AND({g("bz")}>0,{g("bz")}<3*MAX({g("wz1")},{g("wz2")},{g("wz3")})),"⚠ box too small axially (< 3·wz)",'
         f'IF({g("mem")}>8,"⚠ > 8 GB per file: shorten the duration and use several files",'
-        f'IF(({nor})>0,"⚠ "&({nor})&" species with a warning","✔ OK")))))))')
+        f'IF(({nor})>0,"⚠ "&({nor})&" species with a warning",'
+        f'IF(OR(LEFT({xmsg},1)="✖",LEFT({xmsg},1)="⚠"),"⚠ crosstalk sheet: "&MID({xmsg},3,200),"✔ OK"))))))))')
 calc.sheet_state = "hidden"
 
 # ====================================================================== validation and formatting
@@ -393,13 +515,13 @@ for i in range(1, MAX_SPECIES + 1):
         vpos.add(rng(f"s{i}_{k}"))
 
 
-def traffic(col_range, first_cell):
-    s.conditional_formatting.add(col_range, FormulaRule(formula=[f'LEFT({first_cell},1)="✖"'], fill=RED,
-                                                        font=Font(name=F, color="9C1C1C", bold=True)))
-    s.conditional_formatting.add(col_range, FormulaRule(formula=[f'LEFT({first_cell},1)="⚠"'], fill=ORANGE,
-                                                        font=Font(name=F, color="8A4B00")))
-    s.conditional_formatting.add(col_range, FormulaRule(formula=[f'LEFT({first_cell},1)="✔"'], fill=GREEN,
-                                                        font=Font(name=F, color="1E6B1E")))
+def traffic(col_range, first_cell, ws=s):
+    ws.conditional_formatting.add(col_range, FormulaRule(formula=[f'LEFT({first_cell},1)="✖"'], fill=RED,
+                                                         font=Font(name=F, color="9C1C1C", bold=True)))
+    ws.conditional_formatting.add(col_range, FormulaRule(formula=[f'LEFT({first_cell},1)="⚠"'], fill=ORANGE,
+                                                         font=Font(name=F, color="8A4B00")))
+    ws.conditional_formatting.add(col_range, FormulaRule(formula=[f'LEFT({first_cell},1)="✔"'], fill=GREEN,
+                                                         font=Font(name=F, color="1E6B1E")))
 
 
 traffic(rng("check"), f"${C['check']}{FIRST}")
@@ -410,6 +532,52 @@ for val, colr in (("Done", "D5EFD5"), ("Analysed", "BFE3C6"), ("Running", "D6E6F
     s.conditional_formatting.add(rng("status"), FormulaRule(formula=[f'${st}{FIRST}="{val}"'],
                                                             fill=PatternFill("solid", fgColor=colr)))
 s.auto_filter.ref = f"A3:{L(len(cols))}{LAST}"
+
+# ====================================================================== crosstalk sheet: formulas and formatting
+for r in range(FIRST, LAST + 1):
+    for idx, (k, hd, w, band, title, kind, com) in enumerate(xcols, start=1):
+        c = xs.cell(row=r, column=idx)
+        c.border = BOX
+        c.fill = INPUT if kind == "in" else CALC
+        c.font = BLUE if kind == "in" else BLACK
+        c.alignment = Alignment(vertical="top")
+    x = lambda k: f"${XC[k]}{r}"  # noqa: E731
+    found = f'MATCH({x("id")},{SR("id")},0)'
+    xs[x("name").replace("$", "")] = f'=IF({x("id")}="","",IFERROR(INDEX({SR("name")},{found})&"",""))'
+    xs[x("ncol").replace("$", "")] = f'=IF({x("id")}="","",IFERROR(MAX(1,N(INDEX({SR("ncol")},{found}))),""))'
+    on_ct, on_de = f'{x("ct")}="Yes"', f'{x("de")}="Yes"'
+    vals = lambda kind, pairs: "+".join(f'N({x(kind + p)})' for p in pairs)  # noqa: E731
+    big = ",".join(f'N({x(kind + p)})' for kind in ("ct", "de") for p, _ in XPAIRS)
+    xs[x("check").replace("$", "")] = (
+        f'=IF({x("id")}="","",'
+        f'IF(COUNTIF({SR("id")},{x("id")})=0,"✖ Sim ID not found on the Simulations sheet",'
+        f'IF(COUNTIF(${XC["id"]}${FIRST}:${XC["id"]}${LAST},{x("id")})>1,"✖ Sim ID entered twice on this sheet",'
+        f'IF(AND(NOT({on_ct}),NOT({on_de})),"– off (set Crosstalk? and/or Direct exc.? to Yes)",'
+        f'IF(N({x("ncol")})<2,"⚠ needs ≥ 2 colours - ignored",'
+        f'IF(MAX({big})>1,"⚠ value > 1: write fractions (0.05 = 5 %)",'
+        f'IF(AND({on_ct},{vals("ct", ("12", "13", "23"))}=0),"⚠ crosstalk switched on but all values are 0",'
+        f'IF(AND({on_de},{vals("de", ("12", "13", "23"))}=0),"⚠ direct exc. switched on but all values are 0",'
+        f'IF(AND(N({x("ncol")})<3,OR(AND({on_ct},{vals("ct", ("13", "23"))}>0),AND({on_de},{vals("de", ("13", "23"))}>0))),'
+        f'"⚠ 1→3 and 2→3 ignored (Colours < 3)",'
+        f'"✔ on: "&IF({on_ct},"crosstalk","")&IF(AND({on_ct},{on_de})," + ","")&IF({on_de},"direct excitation","")'
+        f')))))))))')
+xrng = lambda k: f"{XC[k]}{FIRST}:{XC[k]}{LAST}"  # noqa: E731
+v = DataValidation(type="list", formula1=SR("id"), allow_blank=True)
+xs.add_data_validation(v); v.add(xrng("id"))
+v = DataValidation(type="list", formula1="Lists!$C$2:$C$3", allow_blank=True)
+xs.add_data_validation(v); v.add(xrng("ct")); v.add(xrng("de"))
+v = DataValidation(type="decimal", operator="greaterThanOrEqual", formula1="0", allow_blank=True)
+v.error = "Must be >= 0"; xs.add_data_validation(v)
+for pair, _ in XPAIRS:
+    v.add(xrng(f"ct{pair}")); v.add(xrng(f"de{pair}"))
+    for kind in ("ct", "de"):
+        for r in range(FIRST, LAST + 1):
+            xs[f"{XC[kind + pair]}{r}"].number_format = "0.000"
+traffic(xrng("check"), f"${XC['check']}{FIRST}", ws=xs)
+for k in ("ct", "de"):
+    xs.conditional_formatting.add(xrng(k), FormulaRule(formula=[f'${XC[k]}{FIRST}="Yes"'], fill=GREEN,
+                                                       font=Font(name=F, color="1E6B1E", bold=True)))
+xs.auto_filter.ref = f"A3:{L(len(xcols))}{LAST}"
 
 # ====================================================================== pre-filled rows
 base = "/Fablab 4/Users/Fabio/PhD/Projects/3C_FCCS/Simulation"
@@ -460,7 +628,7 @@ sims = [
      "Planned", 3, 150, [("Species 1", 35, 200, [1e4, 7e3, 5e3], lt3, None), ("Species 2", 35, 2000, [1e4, 0, 5e3], lt3, None),
                          ("Species 3", 35, 4000, [2e4, 7e3, 0], lt3, None)]),
 ]
-if ARGS.empty:
+if ARGS.empty or OLD:
     sims = []
 for k, (sid, name, purpose, folder, status, prio, dur, species) in enumerate(sims):
     r = FIRST + k
@@ -492,10 +660,41 @@ for k, (sid, name, purpose, folder, status, prio, dur, species) in enumerate(sim
         else:
             s[f"{sk('fret')}{r}"] = "No FRET"
 
-wb.move_sheet("Column guide", offset=-(len(wb.sheetnames) - 2))
-wb.move_sheet("Lists", offset=10)
-wb.move_sheet("Calc", offset=10)
+
+
+def copy_old(ws, layout, records):
+    """Write the input cells of an old planner into ``ws``; species blocks by (band, header), others by header."""
+    renamed = {"wr [nm]": ("wr 1 [nm]", "wr 2 [nm]", "wr 3 [nm]"),   # planners with one focus for all colours
+               "wz [nm]": ("wz 1 [nm]", "wz 2 [nm]", "wz 3 [nm]")}
+    for k, rec in enumerate(records):
+        by_head = {}
+        for (band, head), v in rec.items():
+            if not band.startswith("Species "):
+                for h in renamed.get(head, (head,)):
+                    by_head.setdefault(h, v)
+        for idx, (key, head, w, band, title, kind, com) in enumerate(layout, start=1):
+            if kind != "in":
+                continue
+            v = rec.get((title, head)) if title.startswith("Species ") else by_head.get(head)
+            if v is not None:
+                ws.cell(row=FIRST + k, column=idx, value=v)
+
+
+if OLD:
+    copy_old(s, cols, OLD["sim"])
+    copy_old(xs, xcols, OLD["xs"])
+
+# example on the crosstalk sheet: realistic values for S00, switched off (set the switches to Yes to use them)
+if not ARGS.empty and not OLD:
+    for key, val in {"id": "S00", "ct": "No", "ct12": 0.08, "ct13": 0.01, "ct23": 0.05,
+                     "de": "No", "de12": 0.05, "de13": 0.01, "de23": 0.06}.items():
+        xs[f"{XC[key]}{FIRST}"] = val
+
+for name in ("How to use", "Column guide", "Simulations", XS_NAME, "Lists", "Calc"):
+    wb.move_sheet(name, offset=len(wb.sheetnames))  # to the end, in this order
 wb.active = wb.sheetnames.index("Simulations")
 wb.save(OUT)
 print(f"saved {OUT}  ({N_ROWS} simulation rows, {MAX_SPECIES} species blocks, {len(cols)} columns)")
+if OLD:
+    print(f"copied {len(OLD['sim'])} simulation(s) and {len(OLD['xs'])} crosstalk row(s) from {ARGS.source}")
 print("Open it in Excel; the calculated cells fill in when Excel opens the file.")
