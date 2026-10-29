@@ -4058,6 +4058,9 @@ if any(mode == 0) || any(mode == 1) || any(mode == 2) || any(mode == 3)
                             %%% Calculate intensity trace for PIE channel
                             if ~isempty(PIE_MT)
                                 PamMeta.Trace{i}=histc(PIE_MT,PamMeta.TimeBins)./str2double(h.MT.Binning.String);
+                            else
+                                %%% No photons in PIE window, create zero trace
+                                PamMeta.Trace{i}=zeros(numel(PamMeta.TimeBins),1);
                             end
                         end
                     end
@@ -4688,6 +4691,10 @@ if any(mode==2)
     delete(h.Trace.Axes.Children(logical(del)));
     h.Plots.Trace = {};
     for t = h.PIE.List.Value
+        %%% trace is outdated (e.g. empty PIE channel or changed binning), use zero trace
+        if numel(PamMeta.Trace{t}) ~= numel(PamMeta.TimeBins)
+            PamMeta.Trace{t} = zeros(numel(PamMeta.TimeBins),1);
+        end
         %%% create plot
         h.Plots.Trace{end+1} = plot(PamMeta.TimeBins(1:end-1)+min(diff(PamMeta.TimeBins))/2,PamMeta.Trace{t}(1:end-1),'Color',userValues.PIE.Color(t,:),'Parent',h.Trace.Axes);
     end
