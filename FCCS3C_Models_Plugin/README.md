@@ -1,7 +1,34 @@
-# 3C-FCCS models for FCSFit
+# 3C-FCCS fit models plugin for PAM / FCSFit
 
-FCSFit (PAM v1.7+) loads every `*.m` model function in `<PAM root>/Models/fcs/`.
-This folder holds one family of models for a 3C-FCCS measurement. Every model
+## Install (once)
+
+1. Unzip this folder anywhere (it does not have to be inside PAM).
+2. In MATLAB, go to this folder and run:
+
+   ```matlab
+   install_fccs3c_models
+   ```
+
+   It finds PAM on your MATLAB path (or asks for the PAM folder). You can also
+   give it directly: `install_fccs3c_models('C:\path\to\PAM')`.
+3. Close all FCSFit windows and open FCSFit again. The models are in
+   **3C-FCCS > Fit models > 1 component / 2 components**.
+
+The installer:
+
+* copies the 8 `models/FCCS3C_*.m` files to `<PAM>/Models/fcs/`,
+* copies `FCCS3C_Menu.m` to `<PAM>/`,
+* adds 6 lines (between `>>> 3C-FCCS fit models` markers) at the end of the
+  main function in `<PAM>/FCSFit.m`, and keeps a backup
+  `FCSFit.m.bak_fccs3c`.
+
+Running it again updates the models and the menu; `FCSFit.m` is only changed
+once. `uninstall_fccs3c_models` removes everything again and restores
+`FCSFit.m` to exactly what it was.
+
+## The models
+
+One family of models for a 3C-FCCS measurement. Every model
 fits **autocorrelations (GG, RR, BB), 2-colour cross-correlations (GR, GB, RB)
 and the 3-colour triple correlation**, selected with the `3C (0/1)` column.
 
@@ -69,31 +96,7 @@ Channel c is ignored when 3C = 0.
 
 ## The 3C-FCCS menu
 
-`FCCS3C_Menu.m` (in the PAM root, next to `FCSFit.m`) adds
-**3C-FCCS > Fit models** to the FCSFit menu bar, with all 8 models, a check
-mark on the loaded one, and a short help. It goes into the existing 3C-FCCS
-menu created by the `+fcs3c` extension (`fcs3c.addMenu`); if that menu is not
-there, it creates one.
-
-`FCSFit.m` in this repo is your FCSFit with one addition at the end of the
-main `FCSFit` function, after the fit model is loaded:
-
-```matlab
-    if exist('FCCS3C_Menu', 'file')
-        FCCS3C_Menu(fig);
-    end
-```
-
-Without `FCCS3C_Menu.m` FCSFit works exactly as before. You can also type
-`FCCS3C_Menu` in the MATLAB command window while FCSFit is open.
-
-## Install / update
-
-1. Close PAM / FCSFit.
-2. Copy all `Models/fcs/FCCS3C_*.m` files into the `Models/fcs/` folder of the
-   PAM installation you run (next to `FCS_D.m`, `FCS_TauD.m`, ...),
-   replacing older versions of the same files.
-3. Copy `FCCS3C_Menu.m` into the PAM root folder (where `FCSFit.m` is).
-4. Replace your `FCSFit.m` with the one from this repo (or add the three
-   lines above to yours, at the end of the main `FCSFit` function).
-5. Restart PAM, open FCSFit and pick a model from 3C-FCCS > Fit models.
+`FCCS3C_Menu.m` adds **Fit models** to the existing **3C-FCCS** menu of
+FCSFit (the one from the `+fcs3c` extension), with all 8 models, a check mark
+on the loaded one, and a short help. If there is no 3C-FCCS menu, it creates
+one. Clicking a model loads it exactly like File > Load Fit Function.
