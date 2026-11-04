@@ -71,26 +71,29 @@ Channel c is ignored when 3C = 0.
 
 `FCCS3C_Menu.m` (in the PAM root, next to `FCSFit.m`) adds
 **3C-FCCS > Fit models** to the FCSFit menu bar, with all 8 models, a check
-mark on the loaded one, and a short help. If there is already a menu whose
-name contains "3C", the models are added to it; otherwise the menu is created.
+mark on the loaded one, and a short help. It goes into the existing 3C-FCCS
+menu created by the `+fcs3c` extension (`fcs3c.addMenu`); if that menu is not
+there, it creates one.
 
-To make it appear every time FCSFit opens, add one line to `FCSFit.m`, at the
-end of the main `FCSFit` function (after the `if isempty(data) ... end`
-block, just before that function's final `end`):
+`FCSFit.m` in this repo is your FCSFit with one addition at the end of the
+main `FCSFit` function, after the fit model is loaded:
 
 ```matlab
-    FCCS3C_Menu(fig);
+    if exist('FCCS3C_Menu', 'file')
+        FCCS3C_Menu(fig);
+    end
 ```
 
-Without editing `FCSFit.m` you can also type `FCCS3C_Menu` in the MATLAB
-command window while FCSFit is open.
+Without `FCCS3C_Menu.m` FCSFit works exactly as before. You can also type
+`FCCS3C_Menu` in the MATLAB command window while FCSFit is open.
 
 ## Install / update
 
-1. Close FCSFit.
+1. Close PAM / FCSFit.
 2. Copy all `Models/fcs/FCCS3C_*.m` files into the `Models/fcs/` folder of the
-   PAM installation you run (next to `FCS_D.m`, `FCS_TauD.m`, ...). This
-   replaces the previous versions of the same files.
+   PAM installation you run (next to `FCS_D.m`, `FCS_TauD.m`, ...),
+   replacing older versions of the same files.
 3. Copy `FCCS3C_Menu.m` into the PAM root folder (where `FCSFit.m` is).
-4. Add `FCCS3C_Menu(fig);` to `FCSFit.m` as described above.
-5. Restart PAM / FCSFit and pick a model from 3C-FCCS > Fit models.
+4. Replace your `FCSFit.m` with the one from this repo (or add the three
+   lines above to yours, at the end of the main `FCSFit` function).
+5. Restart PAM, open FCSFit and pick a model from 3C-FCCS > Fit models.
