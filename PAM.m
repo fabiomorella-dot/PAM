@@ -283,11 +283,6 @@ h.Menu.NumberOfCores = uimenu(...
     'Tag','UseParfor',...
     'Label',['Number of Cores: ' num2str(userValues.Settings.Pam.NumberOfCores)],...
     'Callback',@Calculate_Settings);
-h.Menu.Sim = uimenu(...
-    'Parent', h.Menu.Extras,...
-    'Tag','Sim_Menu',...
-    'Label','Simulate photon data',...
-    'Callback',@Sim);
 h.Menu.Look = uimenu(...
     'Parent', h.Menu.Extras,...
     'Tag','Look_Menu',...
@@ -310,6 +305,34 @@ h.Menu.LoadOldProfile = uimenu( ...
     'Label', 'Load Old Profile', ...
     'Separator', 'on', ...
     'Callback', @loadOldProfile);
+
+%%% SIMULATOR menu: PAMsim, the photon simulation for PAM (a Python program in its own folder)
+h.Menu.Simulator = uimenu(...
+    'Parent',h.Pam,...
+    'Tag','Simulator',...
+    'Label','SIMULATOR');
+h.Menu.SimulatorOpen = uimenu(...
+    'Parent', h.Menu.Simulator,...
+    'Tag','SimulatorOpen',...
+    'Label','Open PAMsim',...
+    'Callback',@PAMsim_Open);
+h.Menu.SimulatorInstall = uimenu(...
+    'Parent', h.Menu.Simulator,...
+    'Tag','SimulatorInstall',...
+    'Label','Install / update PAMsim...',...
+    'Separator','on',...
+    'Callback',@PAMsim_Install);
+h.Menu.SimulatorFolder = uimenu(...
+    'Parent', h.Menu.Simulator,...
+    'Tag','SimulatorFolder',...
+    'Label','Show the PAMsim folder',...
+    'Callback',@PAMsim_ShowFolder);
+h.Menu.SimulatorHelp = uimenu(...
+    'Parent', h.Menu.Simulator,...
+    'Tag','SimulatorHelp',...
+    'Label','How does PAMsim work?',...
+    'Separator','on',...
+    'Callback',@PAMsim_Help);
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Progressbar and file name %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -14595,3 +14618,252 @@ function Stop_All(~,~)
 figure(findobj('Tag','Pam'));
 h=guidata(findobj('Tag','Pam'));
 h.Pam.WindowButtonMotionFcn=[];
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% SIMULATOR menu: open and install PAMsim %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% PAMsim (github.com/fabiomorella-dot/PAMsim) is a Python program with its
+%%% own window. It is installed once (SIMULATOR > Install / update PAMsim);
+%%% PAM remembers its folder with setpref('PAMsim','Folder',...) and starts it
+%%% from SIMULATOR > Open PAMsim. Its .sim files open in PAM via
+%%% Load TCSPC Data > "Pam Simulation Files".
+function PAMsim_Open(~,~)
+folder = PAMsim_Folder();
+if isempty(folder)
+    choice = questdlg({'PAMsim is not installed yet.', '', ...
+        'Install it now? PAM downloads PAMsim from GitHub (or uses a PAMsim folder you already have) and runs its installer once.'}, ...
+        'PAMsim', 'Install PAMsim', 'Cancel', 'Install PAMsim');
+    if strcmp(choice, 'Install PAMsim')
+        PAMsim_Install();
+    end
+    return;
+end
+[py, pyw] = PAMsim_Python();
+if isempty(py)
+    choice = questdlg({'Python was not found on this computer.', '', ...
+        'Install Python 3.9 or newer from python.org (tick "Add python.exe to PATH"), then run SIMULATOR > Install / update PAMsim.'}, ...
+        'PAMsim', 'Open python.org', 'Cancel', 'Open python.org');
+    if strcmp(choice, 'Open python.org')
+        web('https://www.python.org/downloads/', '-browser');
+    end
+    return;
+end
+%%% the libraries PAMsim needs must be installed for this Python
+[status, ~] = system([py ' -c "import numpy, scipy, numba"']);
+if status ~= 0
+    choice = questdlg({'PAMsim is in', folder, '', ...
+        'but its Python libraries (numpy, scipy, numba) are not installed yet. Run the PAMsim installer now?'}, ...
+        'PAMsim', 'Run the installer', 'Cancel', 'Run the installer');
+    if strcmp(choice, 'Run the installer')
+        PAMsim_RunInstaller(folder, false);
+    end
+    return;
+end
+launcher = fullfile(folder, 'python', 'PAMsim.pyw');
+if ispc
+    status = system(['start "" ' pyw ' "' launcher '"']);
+else
+    status = system([pyw ' "' launcher '" > /dev/null 2>&1 &']);
+end
+if status ~= 0
+    errordlg({'PAMsim could not be started:', launcher, '', ...
+        'Run SIMULATOR > Install / update PAMsim, then try again.'}, 'PAMsim');
+end
+
+function PAMsim_Install(~,~)
+url = 'https://github.com/fabiomorella-dot/PAMsim';
+folder = PAMsim_Folder();
+if ~isempty(folder)
+    choice = questdlg({'PAMsim is installed in', folder, '', ...
+        'Update it to the newest version, or use another PAMsim folder?'}, ...
+        'PAMsim', 'Update', 'Use another folder', 'Cancel', 'Update');
+    switch choice
+        case 'Update'
+            PAMsim_RunInstaller(folder, true);
+        case 'Use another folder'
+            PAMsim_ChooseFolder();
+    end
+    return;
+end
+choice = questdlg({'PAMsim, the photon simulation for PAM, is installed once; afterwards it opens with SIMULATOR > Open PAMsim.', '', ...
+    'Download PAMsim from GitHub now, or use a PAMsim folder you already have (e.g. unzipped from GitHub)?'}, ...
+    'Install PAMsim', 'Download from GitHub', 'I have the PAMsim folder', 'Cancel', 'Download from GitHub');
+switch choice
+    case 'Download from GitHub'
+        PAMsim_Download(url);
+    case 'I have the PAMsim folder'
+        PAMsim_ChooseFolder();
+end
+
+function PAMsim_Download(url)
+%%% downloads PAMsim with git (git also updates it later); without git: ZIP from the GitHub page
+[status, ~] = system('git --version');
+if status ~= 0
+    choice = questdlg({'Downloading PAMsim needs Git, which is not installed on this computer.', '', ...
+        'Either install Git (git-scm.com) and try again, or download PAMsim in your browser: on the GitHub page press Code > Download ZIP, unzip it, then use SIMULATOR > Install / update PAMsim > I have the PAMsim folder.'}, ...
+        'Install PAMsim', 'Open the GitHub page', 'Cancel', 'Open the GitHub page');
+    if strcmp(choice, 'Open the GitHub page')
+        web(url, '-browser');
+    end
+    return;
+end
+parent = uigetdir(PAMsim_DefaultParent(), 'Choose where the folder PAMsim is created');
+if isequal(parent, 0)
+    return;
+end
+target = fullfile(parent, 'PAMsim');
+if exist(target, 'dir') == 7
+    if PAMsim_IsFolder(target) %%% already there: use it and update it
+        setpref('PAMsim', 'Folder', target);
+        PAMsim_RunInstaller(target, true);
+    else
+        errordlg({'There is already a folder', target, 'that is not PAMsim. Choose another place.'}, 'Install PAMsim');
+    end
+    return;
+end
+wait = msgbox({'Downloading PAMsim from GitHub ...', '(GitHub may ask you to sign in.)'}, 'Install PAMsim');
+drawnow;
+[status, out] = system(['git clone ' url '.git "' target '"']);
+if ishandle(wait)
+    delete(wait);
+end
+if status ~= 0 || ~PAMsim_IsFolder(target)
+    errordlg({'The download failed:', strtrim(out), '', ...
+        'Check the internet connection and that your GitHub account can open', url, ...
+        'Or download it there with Code > Download ZIP, unzip it and use "I have the PAMsim folder".'}, 'Install PAMsim');
+    return;
+end
+setpref('PAMsim', 'Folder', target);
+PAMsim_RunInstaller(target, false);
+
+function folder = PAMsim_ChooseFolder()
+folder = '';
+f = uigetdir(PAMsim_DefaultParent(), 'Select the PAMsim folder (it contains Install_PAMsim.bat and the folder python)');
+if isequal(f, 0)
+    return;
+end
+if ~PAMsim_IsFolder(f) %%% the folder above it, or the folder unzipped from GitHub, was selected
+    if PAMsim_IsFolder(fullfile(f, 'PAMsim'))
+        f = fullfile(f, 'PAMsim');
+    elseif PAMsim_IsFolder(fullfile(f, 'PAMsim-main'))
+        f = fullfile(f, 'PAMsim-main');
+    else
+        errordlg({'This is not a PAMsim folder:', f, '', ...
+            'The PAMsim folder contains Install_PAMsim.bat and a folder "python" with PAMsim.pyw.'}, 'PAMsim');
+        return;
+    end
+end
+setpref('PAMsim', 'Folder', f);
+folder = f;
+PAMsim_RunInstaller(f, false);
+
+function PAMsim_RunInstaller(folder, update)
+%%% Windows: the installer (or updater) runs in its own console window; macOS / Linux: here
+isGit = exist(fullfile(folder, '.git'), 'dir') == 7;
+if ispc
+    if update && isGit
+        script = fullfile(folder, 'Update_PAMsim.bat');
+    else
+        script = fullfile(folder, 'Install_PAMsim.bat');
+    end
+    system(['start "PAMsim" cmd /c ""' script '""']);
+    lines = {'The PAMsim installer runs in the black window that just opened.', '', ...
+        'When it says "Done" (or "up to date"), press a key to close it, then open PAMsim with SIMULATOR > Open PAMsim.'};
+    if update && ~isGit
+        lines = [lines, {'', 'This PAMsim folder was not downloaded with Git, so only its libraries are updated. For the newest PAMsim, download it again from GitHub.'}];
+    end
+    msgbox(lines, 'PAMsim');
+else
+    wait = msgbox('Installing PAMsim ... (this takes a minute)', 'PAMsim');
+    drawnow;
+    out = '';
+    status = 0;
+    if update && isGit
+        [status, out] = system(['cd "' folder '" && git pull']);
+    end
+    if status == 0
+        [status, out] = system(['bash "' fullfile(folder, 'python', 'install_pamsim.sh') '"']);
+    end
+    if ishandle(wait)
+        delete(wait);
+    end
+    if status == 0
+        msgbox('PAMsim is installed: open it with SIMULATOR > Open PAMsim.', 'PAMsim');
+    else
+        errordlg({'The PAMsim installation failed:', strtrim(out)}, 'PAMsim');
+    end
+end
+
+function PAMsim_ShowFolder(~,~)
+folder = PAMsim_Folder();
+if isempty(folder)
+    msgbox('PAMsim is not installed yet: use SIMULATOR > Install / update PAMsim.', 'PAMsim');
+elseif ispc
+    winopen(folder);
+elseif ismac
+    system(['open "' folder '"']);
+else
+    system(['xdg-open "' folder '" &']);
+end
+
+function PAMsim_Help(~,~)
+msgbox({'PAMsim simulates photon data for PAM (FCS, FCCS, smFRET point measurements).', '', ...
+    '1. SIMULATOR > Install / update PAMsim (only once): downloads PAMsim and installs it.', ...
+    '2. SIMULATOR > Open PAMsim: choose the output folder, press Create Planner and fill in the Excel planner (one row per simulation).', ...
+    '3. In PAMsim select the simulations and press Start simulation.', ...
+    '4. In PAM: File > Load TCSPC Data, file type "Pam Simulation Files", select the .sim files.', '', ...
+    'The Help button in PAMsim and the sheets "How to use" and "Column guide" of the planner explain everything in detail.'}, ...
+    'How does PAMsim work?');
+
+function folder = PAMsim_Folder()
+%%% the PAMsim folder PAM remembers, or one next to / inside the PAM folder; '' when none is found
+folder = '';
+if ispref('PAMsim', 'Folder') && PAMsim_IsFolder(getpref('PAMsim', 'Folder'))
+    folder = getpref('PAMsim', 'Folder');
+    return;
+end
+app = PAMsim_AppFolder();
+candidates = {fullfile(app, 'PAMsim'), fullfile(fileparts(app), 'PAMsim'), fullfile(fileparts(app), 'PAMsim-main')};
+for k = 1:numel(candidates)
+    if PAMsim_IsFolder(candidates{k})
+        folder = candidates{k};
+        setpref('PAMsim', 'Folder', folder);
+        return;
+    end
+end
+
+function ok = PAMsim_IsFolder(f)
+ok = ischar(f) && ~isempty(f) && exist(fullfile(f, 'python', 'PAMsim.pyw'), 'file') == 2;
+
+function app = PAMsim_AppFolder()
+app = getAppFolder();
+while numel(app) > 1 && (app(end) == '/' || app(end) == '\')
+    app = app(1:end-1);
+end
+
+function parent = PAMsim_DefaultParent()
+parent = fileparts(PAMsim_AppFolder());
+if isempty(parent) || exist(parent, 'dir') ~= 7
+    parent = PAMsim_AppFolder();
+end
+
+function [py, pyw] = PAMsim_Python()
+%%% the same Python as Install_PAMsim.bat uses: the py launcher, else python
+py = '';
+pyw = '';
+if ispc
+    if system('where py >nul 2>nul') == 0
+        py = 'py -3';
+        pyw = 'pyw -3';
+    elseif system('where python >nul 2>nul') == 0
+        py = 'python';
+        pyw = 'pythonw';
+    end
+else
+    if system('command -v python3 >/dev/null 2>&1') == 0
+        py = 'python3';
+    elseif system('command -v python >/dev/null 2>&1') == 0
+        py = 'python';
+    end
+    pyw = py;
+end
