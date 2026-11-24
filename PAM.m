@@ -3165,6 +3165,13 @@ h.PIE.DonorOnlyReference = uimenu(...
     'Label','Save Donor-only Reference for selected PIE Channel',...
     'Tag','PIE_DonorOnly_Ref',...
     'Callback',@SaveLoadIrfScat);
+%%% Proposes From/To of all PIE channels from the microtime histograms
+h.PIE.AutoPIE_Menu = uimenu(...
+    'Parent',h.PIE.List_Menu,...
+    'Label','Auto PIE (set From/To of all channels)...',...
+    'Tag','PIE_AutoPIE',...
+    'Separator','on',...
+    'Callback',@Auto_PIE);
 %%% PIE Channel list
 h.PIE.List = uicontrol(...
     'Parent',h.PIE.Panel,...
@@ -3333,6 +3340,22 @@ h.PIE.Info = uicontrol(...
     'BackgroundColor', Look.Back,...
     'ForegroundColor', Look.Fore,...
     'Position',[0.76 0 0.24 0.58]);
+%%% Button to propose From/To of all PIE channels automatically
+h.PIE.AutoPIE_Button = uicontrol(...
+    'Parent',h.PIE.Panel,...
+    'Tag','PIE_AutoPIE_Button',...
+    'Style','pushbutton',...
+    'Units','normalized',...
+    'FontSize',12,...
+    'BackgroundColor', Look.Control,...
+    'ForegroundColor', Look.Fore,...
+    'String','Auto PIE...',...
+    'Callback',@Auto_PIE,...
+    'Position',[0.425 0.03 0.3 0.09],...
+    'TooltipString',sprintf(['Propose From/To for all PIE channels:\n'...
+    'from just before each laser rise to the next laser pulse,\n'...
+    'or earlier where the decay reaches the background.\n'...
+    'Shows the proposal first; nothing changes until you press Apply.']));
 %%% General file information table
 ColumnNames = {'',''};
 RowNames = [];
@@ -15170,3 +15193,503 @@ else
     end
     pyw = py;
 end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Auto PIE: proposes From/To of all PIE channels %%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% From = laser rise - margin. To = earliest of (a) the next laser rise in
+%%% the same detector - margin and (b) where the decay reaches background.
+%%% Laser rises come from the saved IRF (then buffer, then the data) and are
+%%% refined on the loaded measurement. The proposal is shown in a table
+%%% first; nothing changes until "Apply" is pressed, and "Undo" restores the
+%%% previous windows.
+function Auto_PIE(~,~)
+global FileInfo
+[userValues, ~] = UserValues.load();
+if strcmp(FileInfo.FileName{1},'Nothing loaded') || FileInfo.MI_Bins <= 1
+    errordlg('Load a TCSPC measurement first.','Auto PIE');
+    return;
+end
+Look = userValues.Look;
+fig = findobj('Tag','Pam_AutoPIE');
+if ~isempty(fig)
+    figure(fig(1));
+    AutoPIE_Calculate(fig(1));
+    return;
+end
+fig = figure(...
+    'Tag','Pam_AutoPIE',...
+    'Name','Auto PIE',...
+    'NumberTitle','off',...
+    'MenuBar','none',...
+    'ToolBar','none',...
+    'Units','normalized',...
+    'Position',[0.15 0.2 0.7 0.55],...
+    'Color',Look.Back);
+uicontrol('Parent',fig,'Style','text','Units','normalized','FontSize',11,...
+    'BackgroundColor',Look.Back,'ForegroundColor',Look.Fore,'HorizontalAlignment','left',...
+    'String','Margin [ns]:','Position',[0.01 0.915 0.08 0.05]);
+uicontrol('Parent',fig,'Style','edit','Units','normalized','FontSize',11,...
+    'Tag','AutoPIE_Margin','BackgroundColor',Look.Control,'ForegroundColor',Look.Fore,...
+    'String','0.2','Callback',@(~,~) AutoPIE_Calculate(fig),'Position',[0.09 0.92 0.05 0.055],...
+    'TooltipString','Gap kept before each laser rise (start of a window and end of the previous one)');
+uicontrol('Parent',fig,'Style','text','Units','normalized','FontSize',11,...
+    'BackgroundColor',Look.Back,'ForegroundColor',Look.Fore,'HorizontalAlignment','left',...
+    'String','End of decay:','Position',[0.16 0.915 0.09 0.05]);
+Mode = uicontrol('Parent',fig,'Style','popupmenu','Units','normalized','FontSize',11,...
+    'Tag','AutoPIE_Mode','BackgroundColor',Look.Control,'ForegroundColor',Look.Fore,...
+    'String',{'Best signal-to-noise, S/sqrt(S+B) (recommended)';'Last bin 3 sigma above background (more photons)'},...
+    'Callback',@(~,~) AutoPIE_Calculate(fig),'Position',[0.25 0.92 0.36 0.055],...
+    'TooltipString','Where a window stops when the decay reaches the background before the next laser pulse');
+if ismac
+    Mode.ForegroundColor = [0 0 0];
+    Mode.BackgroundColor = [1 1 1];
+end
+uicontrol('Parent',fig,'Style','pushbutton','Units','normalized','FontSize',11,...
+    'BackgroundColor',Look.Control,'ForegroundColor',Look.Fore,...
+    'String','Recalculate','Callback',@(~,~) AutoPIE_Calculate(fig),'Position',[0.63 0.915 0.12 0.06]);
+uitable('Parent',fig,'Tag','AutoPIE_Table','Units','normalized','FontSize',10,...
+    'ForegroundColor',Look.TableFore,'BackgroundColor',[Look.Table1;Look.Table2],...
+    'ColumnName',{'Apply','PIE channel','Detector','Laser rise from','From','To','New From','New To',...
+    'Photons now','Photons new','Background new [%]','Why To ends there'},...
+    'ColumnFormat',{'logical','char','char','char','numeric','numeric','numeric','numeric','numeric','numeric','numeric','char'},...
+    'ColumnEditable',[true false(1,11)],...
+    'RowName',[],...
+    'Position',[0.01 0.13 0.98 0.77]);
+uicontrol('Parent',fig,'Style','text','Units','normalized','FontSize',9,...
+    'BackgroundColor',Look.Back,'ForegroundColor',Look.Fore,'HorizontalAlignment','left',...
+    'Position',[0.01 0.01 0.56 0.1],...
+    'String',{'Laser rises come from the saved IRF (else the saved buffer, else this measurement) and are aligned on this measurement.';...
+    '"other detectors": the laser is not visible in this detector, its time is taken from the detectors that see it.';...
+    'Untick rows you do not want to change. Nothing changes until you press Apply.'});
+uicontrol('Parent',fig,'Style','pushbutton','Units','normalized','FontSize',12,'FontWeight','bold',...
+    'BackgroundColor',Look.Control,'ForegroundColor',Look.Fore,...
+    'String','Apply','Callback',@(~,~) AutoPIE_Apply(fig),'Position',[0.59 0.025 0.13 0.075]);
+uicontrol('Parent',fig,'Style','pushbutton','Units','normalized','FontSize',12,...
+    'Tag','AutoPIE_Undo','BackgroundColor',Look.Control,'ForegroundColor',Look.Fore,...
+    'String','Undo','Callback',@(~,~) AutoPIE_Undo(fig),'Position',[0.73 0.025 0.12 0.075],...
+    'TooltipString','Restore the From/To values from before the last Apply');
+uicontrol('Parent',fig,'Style','pushbutton','Units','normalized','FontSize',12,...
+    'BackgroundColor',Look.Control,'ForegroundColor',Look.Fore,...
+    'String','Close','Callback',@(~,~) delete(fig),'Position',[0.86 0.025 0.13 0.075]);
+AutoPIE_Calculate(fig);
+
+%%% Computes the proposal and fills the table
+function AutoPIE_Calculate(fig)
+global PamMeta FileInfo
+[userValues, ~] = UserValues.load();
+nChan = numel(userValues.PIE.Name);
+Chan.Name = userValues.PIE.Name;
+Chan.Det = zeros(1,nChan);
+Chan.From = userValues.PIE.From(:)';
+Chan.IRF = cell(1,nChan);
+Chan.Scatter = cell(1,nChan);
+DetName = repmat({'-'},1,nChan);
+for k = 1:nChan
+    if isempty(userValues.PIE.Combined{k}) && userValues.PIE.Detector(k) > 0
+        d = find(userValues.Detector.Det == userValues.PIE.Detector(k) & userValues.Detector.Rout == userValues.PIE.Router(k),1);
+        if ~isempty(d) && d <= numel(PamMeta.MI_Hist)
+            Chan.Det(k) = d;
+            DetName{k} = userValues.Detector.Name{d};
+        end
+    end
+    if k <= numel(userValues.PIE.IRF)
+        Chan.IRF{k} = userValues.PIE.IRF{k};
+    end
+    if k <= numel(userValues.PIE.ScatterPattern)
+        Chan.Scatter{k} = userValues.PIE.ScatterPattern{k};
+    end
+end
+Opt.Res = 1E9*FileInfo.TACRange/FileInfo.MI_Bins;
+Opt.PeriodBins = round(FileInfo.SyncPeriod/FileInfo.TACRange*FileInfo.MI_Bins);
+if ~isfinite(Opt.PeriodBins) || Opt.PeriodBins <= 0
+    Opt.PeriodBins = Inf;
+end
+Opt.Margin = str2double(get(findobj(fig,'Tag','AutoPIE_Margin'),'String'));
+if ~isfinite(Opt.Margin) || Opt.Margin < 0
+    Opt.Margin = 0.2;
+    set(findobj(fig,'Tag','AutoPIE_Margin'),'String','0.2');
+end
+Opt.Mode = get(findobj(fig,'Tag','AutoPIE_Mode'),'Value');
+
+Res = AutoPIE_Core(PamMeta.MI_Hist,Chan,Opt);
+
+Data = cell(nChan,12);
+for k = 1:nChan
+    From = userValues.PIE.From(k); To = userValues.PIE.To(k);
+    Data(k,1:6) = {Res(k).OK, Chan.Name{k}, DetName{k}, '', From, To};
+    Data(k,9) = {NaN};
+    if Chan.Det(k) > 0
+        H = PamMeta.MI_Hist{Chan.Det(k)};
+        Data{k,9} = sum(H(max(From,1):min(To,numel(H))));
+    end
+    if Res(k).OK
+        Data(k,4) = {[Res(k).Laser ' laser: ' Res(k).Source]};
+        Data(k,7:8) = {Res(k).From, Res(k).To};
+        Data{k,10} = Res(k).Signal+Res(k).Background;
+        Data{k,11} = round(1000*Res(k).Background/max(Data{k,10},1))/10;
+    else
+        Data(k,7:8) = {NaN, NaN};
+        Data(k,10:11) = {NaN, NaN};
+    end
+    Data{k,12} = Res(k).Note;
+end
+set(findobj(fig,'Tag','AutoPIE_Table'),'Data',Data);
+setappdata(fig,'AutoPIE_Res',Res);
+
+%%% Applies the ticked proposals
+function AutoPIE_Apply(fig)
+[userValues, ~] = UserValues.load();
+Res = getappdata(fig,'AutoPIE_Res');
+Data = get(findobj(fig,'Tag','AutoPIE_Table'),'Data');
+if isempty(Res) || isempty(Data)
+    return;
+end
+Sel = find(cell2mat(Data(:,1))' & [Res.OK]);
+Sel = Sel(Sel <= numel(userValues.PIE.Name) & strcmp(Data(Sel,2)',userValues.PIE.Name(Sel)));
+if isempty(Sel)
+    return;
+end
+Undo.Channels = Sel;
+Undo.Names = userValues.PIE.Name(Sel);
+Undo.From = userValues.PIE.From(Sel);
+Undo.To = userValues.PIE.To(Sel);
+setappdata(fig,'AutoPIE_UndoData',Undo);
+for k = Sel
+    userValues.PIE.From(k) = Res(k).From;
+    userValues.PIE.To(k) = Res(k).To;
+end
+AutoPIE_Refresh(Sel);
+AutoPIE_Calculate(fig);
+
+%%% Restores the windows from before the last Apply
+function AutoPIE_Undo(fig)
+[userValues, ~] = UserValues.load();
+Undo = getappdata(fig,'AutoPIE_UndoData');
+if isempty(Undo)
+    return;
+end
+Sel = Undo.Channels;
+Keep = Sel <= numel(userValues.PIE.Name);
+Keep(Keep) = strcmp(userValues.PIE.Name(Sel(Keep)),Undo.Names(Keep));
+for i = find(Keep)
+    userValues.PIE.From(Sel(i)) = Undo.From(i);
+    userValues.PIE.To(Sel(i)) = Undo.To(i);
+end
+setappdata(fig,'AutoPIE_UndoData',[]);
+AutoPIE_Refresh(Sel(Keep));
+AutoPIE_Calculate(fig);
+
+%%% Updates PAM after From/To changes (same as editing From/To by hand)
+function AutoPIE_Refresh(Sel)
+if isempty(Sel)
+    return;
+end
+Update_Data([],[],[],Sel);
+Update_Display([],[],0);
+Update_to_UserValues;
+
+%%% Core of Auto PIE (no GUI, no globals; see Auto_PIE)
+function Res = AutoPIE_Core(Hist, Chan, Opt)
+%%% Proposes From/To microtime windows for all PIE channels.
+%%%
+%%% Hist : cell, microtime histogram per detector (PamMeta.MI_Hist)
+%%% Chan : struct with fields (one entry per PIE channel)
+%%%          Name    - PIE channel names; the first two letters are read as
+%%%                    excitation laser and detection colour (BB1, BG_FRET, ...)
+%%%          Det     - index into Hist (0 = combined channel, skipped)
+%%%          IRF     - saved IRF patterns (cell, may be empty)
+%%%          Scatter - saved buffer/scatter patterns (cell, may be empty)
+%%%          From    - current From values (pulse guess for lasers not found)
+%%% Opt  : Res        - TCSPC bin width [ns]
+%%%        PeriodBins - laser period in TCSPC bins (Inf if >= TAC range)
+%%%        Margin     - gap before a laser rise [ns]
+%%%        Mode       - 1: end where S/sqrt(S+B) is best
+%%%                     2: end where the decay is no longer 3 sigma above background
+%%%
+%%% Rules: From = laser rise - Margin. To = earliest of (a) next laser rise
+%%% in the same detector - Margin and (b) the background cut-off of Opt.Mode.
+nChan = numel(Chan.Name);
+Margin = max(1,round(Opt.Margin/Opt.Res));
+Win = max(5,round(1/Opt.Res));          %%% 1 ns in bins
+ws = max(3,round(0.1/Opt.Res));         %%% smoothing for finding rises
+Lb = max(5,round(0.5/Opt.Res));         %%% block length for the background level
+Res = repmat(struct('From',NaN,'To',NaN,'Laser','','Source','','Note','',...
+    'Signal',NaN,'Background',NaN,'OK',false),nChan,1);
+
+%%% Excitation/detection letters from the PIE channel names
+Ex = repmat(' ',1,nChan); Em = repmat(' ',1,nChan);
+for k = 1:nChan
+    Letters = upper(regexprep(Chan.Name{k},'[^A-Za-z]',''));
+    if numel(Letters) >= 2
+        Ex(k) = Letters(1); Em(k) = Letters(2);
+    end
+end
+
+%%% Detector properties: valid microtime range and background per bin
+nDet = numel(Hist);
+Det = repmat(struct('H',[],'V',[0 0],'B',[],'Floor',0,'Ok',false),nDet,1);
+for d = unique(Chan.Det(Chan.Det > 0))
+    H = double(Hist{d}(:));
+    n = numel(H);
+    nz = find(H > 0);
+    if numel(nz) < 2 || nz(end)-nz(1) < 10*Win
+        continue;
+    end
+    Edge = max(1,round(0.2/Opt.Res));
+    v1 = nz(1)+Edge; v2 = nz(end)-Edge;
+    Floor = AutoPIE_FlatLevel(H,v1,v2,Lb);
+    if Floor > 0 %%% trim bins at the TAC edges where the response drops
+        Hs = AutoPIE_Smooth(H,ws);
+        while v2 > v1 && Hs(v2) < 0.5*Floor, v2 = v2-1; end
+        while v1 < v2 && Hs(v1) < 0.5*Floor, v1 = v1+1; end
+    end
+    B = Floor*ones(n,1);
+    %%% Shape of a saved buffer measurement (scatter peaks), level from the data
+    for k = find(Chan.Det == d)
+        P = AutoPIE_Pattern(Chan.Scatter,k,n);
+        if ~isempty(P)
+            Ps = AutoPIE_Smooth(P,max(3,round(0.2/Opt.Res)));
+            Pf = AutoPIE_FlatLevel(P,v1,v2,Lb);
+            if Pf > 0
+                B = Floor*max(Ps/Pf,0);
+            end
+            break;
+        end
+    end
+    Det(d).H = H; Det(d).V = [v1 v2]; Det(d).B = B; Det(d).Floor = Floor; Det(d).Ok = true;
+end
+
+%%% Laser rise per (laser letter, detector)
+LaserOn = NaN(26,nDet);
+LaserSrc = cell(26,nDet);
+Color = repmat(' ',1,nDet);
+Li = @(c) double(c)-64;
+
+%%% 1) direct channels (BB, GG, RR, ...): saved IRF, then buffer, then data
+for pass = 1:2
+    for k = 1:nChan
+        d = Chan.Det(k);
+        if d == 0 || ~Det(d).Ok || Ex(k) == ' ' || Li(Ex(k)) < 1 || Li(Ex(k)) > 26
+            continue;
+        end
+        L = Li(Ex(k));
+        if pass == 1 && Ex(k) ~= Em(k)
+            continue; %%% FRET channels in pass 2
+        end
+        if pass == 2 && (Ex(k) == Em(k) || any(isfinite(LaserOn(L,:))) || Color(d) ~= ' ')
+            continue; %%% pass 2 only for a laser seen nowhere else, on a detector with no colour
+        end
+        if ~isnan(LaserOn(L,d))
+            continue;
+        end
+        [On,Src] = AutoPIE_DirectRise(Det(d),Chan,find(Chan.Det == d & Ex == Ex(k)),ws,Lb,Win);
+        if ~isnan(On)
+            LaserOn(L,d) = On; LaserSrc{L,d} = Src;
+            if Color(d) == ' ', Color(d) = Ex(k); end
+        end
+    end
+end
+%%% Laser time from all detectors that see it directly
+tLaser = NaN(26,1);
+for L = 1:26
+    if any(isfinite(LaserOn(L,:)))
+        tLaser(L) = median(LaserOn(L,isfinite(LaserOn(L,:))));
+    end
+end
+%%% Lasers that could not be found: the current From of their direct
+%%% channels (GG, RR, ...) marks the pulse, so that rule (a) still stops other windows before it
+tGuess = NaN(26,1);
+if isfield(Chan,'From')
+    for k = 1:nChan
+        L = Li(Ex(k));
+        if Ex(k) ~= ' ' && Ex(k) == Em(k) && L >= 1 && L <= 26 && isnan(tLaser(L)) && Chan.Det(k) > 0 && k <= numel(Chan.From)
+            tGuess(L) = min([tGuess(L), Chan.From(k)+Margin]);
+        end
+    end
+end
+Lasers = find(isfinite(tLaser))';
+%%% 2) every laser in every detector: predicted, refined if visible in the data
+for d = find([Det.Ok])
+    for L = Lasers
+        if isnan(LaserOn(L,d))
+            [On,Ok] = AutoPIE_Rise(Det(d).H,Det(d).V,tLaser(L)-Win,tLaser(L)+1.5*Win,ws,Lb);
+            if Ok && abs(On-tLaser(L)) <= Win
+                LaserOn(L,d) = On; LaserSrc{L,d} = 'data';
+            else
+                LaserOn(L,d) = round(tLaser(L)); LaserSrc{L,d} = 'other detectors';
+            end
+        end
+    end
+end
+
+%%% Windows
+for k = 1:nChan
+    d = Chan.Det(k);
+    if d == 0
+        Res(k).Note = 'combined channel - not changed';
+        continue;
+    end
+    if ~Det(d).Ok
+        Res(k).Note = 'no photons in this detector';
+        continue;
+    end
+    if Ex(k) == ' ' || Li(Ex(k)) < 1 || Li(Ex(k)) > 26 || isnan(LaserOn(Li(Ex(k)),d))
+        Res(k).Note = ['laser ' strtrim(Ex(k)) ' not found - not changed'];
+        continue;
+    end
+    L = Li(Ex(k));
+    H = Det(d).H; B = Det(d).B; v1 = Det(d).V(1); v2 = Det(d).V(2);
+    On = LaserOn(L,d);
+    From = max(On-Margin,v1);
+    %%% rule (a): next laser rise in this detector, including the next period
+    Next = [];
+    for L2 = Lasers
+        Next = [Next, LaserOn(L2,d)+[0, Opt.PeriodBins, -Opt.PeriodBins]]; %#ok<AGROW>
+    end
+    for L2 = find(isfinite(tGuess))'
+        Next = [Next, tGuess(L2)+[0, Opt.PeriodBins, -Opt.PeriodBins]]; %#ok<AGROW>
+    end
+    Next = Next(isfinite(Next) & Next > On+Win);
+    if isempty(Next)
+        ToA = v2; Why = 'end of TAC range';
+    else
+        ToA = min(Next)-Margin-1; Why = 'next laser pulse';
+        if ToA >= v2
+            ToA = v2; Why = 'end of TAC range';
+        end
+    end
+    if ToA <= From+5
+        Res(k).Note = 'no room before the next laser pulse - not changed';
+        continue;
+    end
+    %%% rule (b): background cut-off
+    Idx = (From:ToA)';
+    C = cumsum(H(Idx)); Bc = cumsum(B(Idx)); S = C-Bc;
+    Hs = AutoPIE_Smooth(H,ws);
+    [~,p] = max(Hs(On:min(On+3*Win,ToA)));
+    q = On+p-1-From+1; %%% decay maximum, index into Idx
+    To = ToA;
+    if S(end) < max(5*sqrt(max(C(end),1)),0.05*Bc(end)) %%% no clear signal in this window
+        Why = [Why ' (no signal above background)'];
+    elseif Opt.Mode == 1
+        Snr = S./sqrt(max(C,1));
+        [~,j] = max(Snr(q:end));
+        if q+j-1 < numel(Idx)
+            To = Idx(q+j-1); Why = 'decay reaches background';
+        end
+    else
+        Lt = max(5,round(0.5/Opt.Res));
+        St = AutoPIE_Smooth(H-B,Lt);
+        Below = find(St(Idx(q):ToA) < 3*sqrt(max(B(Idx(q):ToA),1)/Lt),1);
+        if ~isempty(Below)
+            To = max(Idx(q)+Below-2,Idx(q)); Why = 'decay reaches background';
+        end
+    end
+    j = To-From+1;
+    Res(k).From = From; Res(k).To = To; Res(k).OK = true;
+    Res(k).Laser = Ex(k); Res(k).Source = LaserSrc{L,d};
+    Res(k).Signal = S(j); Res(k).Background = Bc(j);
+    Res(k).Note = ['To: ' Why];
+end
+
+%%% Rise of the laser that excites the direct channels of a detector
+function [On,Src] = AutoPIE_DirectRise(Det,Chan,Ks,ws,Lb,Win)
+On = NaN; Src = '';
+n = numel(Det.H);
+Names = {'IRF','buffer'};
+Fields = {'IRF','Scatter'};
+for f = 1:2
+    for k = Ks
+        P = AutoPIE_Pattern(Chan.(Fields{f}),k,n);
+        if ~isempty(P)
+            [On,Ok] = AutoPIE_Rise(P,Det.V,Det.V(1),Det.V(2),ws,Lb);
+            if Ok
+                Src = Names{f};
+                %%% refine on the measurement itself (laser timing can drift)
+                [On2,Ok2] = AutoPIE_Rise(Det.H,Det.V,On-Win,On+1.5*Win,ws,Lb);
+                if Ok2 && abs(On2-On) <= Win
+                    On = On2; Src = [Src ' + data'];
+                end
+                return;
+            end
+        end
+    end
+end
+[On,Ok] = AutoPIE_Rise(Det.H,Det.V,Det.V(1),Det.V(2),ws,Lb);
+if Ok
+    Src = 'data';
+else
+    On = NaN;
+end
+
+%%% Finds the rise of the strongest peak between Lo and Hi
+function [On,Ok] = AutoPIE_Rise(V,VRange,Lo,Hi,ws,Lb)
+On = NaN; Ok = false;
+V = double(V(:));
+Lo = max(round(Lo),VRange(1)); Hi = min(round(Hi),VRange(2));
+if Hi-Lo < 3
+    return;
+end
+Floor = AutoPIE_FlatLevel(V,VRange(1),VRange(2),Lb);
+S = AutoPIE_Smooth(V,ws)-Floor;
+[Pk,j] = max(S(Lo:Hi));
+Peak = Lo+j-1;
+Sig = sqrt(max(Floor,1)/ws);
+%%% a real rise: well above noise and not just the tail of an earlier decay
+if Pk < 10*Sig || Peak <= Lo+1 || S(Lo) > 0.5*Pk
+    return;
+end
+Thr = max(0.01*Pk,3*Sig);
+On = Peak;
+while On > VRange(1) && S(On-1) > Thr
+    On = On-1;
+end
+Ok = true;
+
+%%% Flat (background) level: mean of the blocks at the lowest level
+function Level = AutoPIE_FlatLevel(V,v1,v2,L)
+V = double(V(:));
+Starts = v1:L:(v2-L+1);
+if isempty(Starts)
+    Level = mean(V(v1:v2));
+    return;
+end
+M = zeros(numel(Starts),1);
+for i = 1:numel(Starts)
+    M(i) = mean(V(Starts(i):Starts(i)+L-1));
+end
+%%% start at the lowest blocks, then average all blocks within 3 sigma of
+%%% that level (symmetric, so the noise does not bias the level low)
+Level = min(M);
+for it = 1:5
+    Sel = abs(M-Level) <= 3*sqrt(max(Level,1)/L);
+    if ~any(Sel)
+        break;
+    end
+    Level = mean(M(Sel));
+end
+
+%%% Moving average
+function Vs = AutoPIE_Smooth(V,w)
+V = double(V(:));
+Vs = conv(V,ones(w,1)/w,'same');
+%%% correct the edges for the missing points
+Norm = conv(ones(size(V)),ones(w,1)/w,'same');
+Vs = Vs./Norm;
+
+%%% Saved IRF/buffer pattern of PIE channel k, [] if not usable
+function P = AutoPIE_Pattern(Patterns,k,n)
+P = [];
+if k > numel(Patterns) || isempty(Patterns{k})
+    return;
+end
+P = double(Patterns{k}(:));
+if sum(P) <= 0
+    P = [];
+    return;
+end
+if numel(P) < n
+    P(end+1:n) = 0;
+end
+P = P(1:n);
