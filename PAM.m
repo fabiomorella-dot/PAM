@@ -15262,11 +15262,14 @@ uitable('Parent',fig,'Tag','AutoPIE_Table','Units','normalized','FontSize',10,..
     'ColumnFormat',{'logical','char','char','char','numeric','numeric','numeric','numeric','numeric','numeric','numeric','char'},...
     'ColumnEditable',[true false(1,11)],...
     'RowName',[],...
-    'Position',[0.01 0.13 0.98 0.77]);
+    'Position',[0.01 0.13 0.98 0.71]);
+uicontrol('Parent',fig,'Style','text','Units','normalized','FontSize',11,'FontWeight','bold',...
+    'Tag','AutoPIE_Pulses','BackgroundColor',Look.Back,'ForegroundColor',Look.Fore,...
+    'HorizontalAlignment','left','String','','Position',[0.01 0.85 0.98 0.05]);
 uicontrol('Parent',fig,'Style','text','Units','normalized','FontSize',9,...
     'BackgroundColor',Look.Back,'ForegroundColor',Look.Fore,'HorizontalAlignment','left',...
     'Position',[0.01 0.01 0.56 0.1],...
-    'String',{'Laser rises come from the saved IRF (else the saved buffer, else this measurement) and are aligned on this measurement.';...
+    'String',{'Laser rises are found in this measurement; a saved IRF/buffer (same number of TCSPC bins) only tells which rise is which laser.';...
     '"other detectors": the laser is not visible in this detector, its time is taken from the detectors that see it.';...
     'Untick rows you do not want to change. Nothing changes until you press Apply.'});
 uicontrol('Parent',fig,'Style','pushbutton','Units','normalized','FontSize',12,'FontWeight','bold',...
@@ -15320,7 +15323,19 @@ end
 Opt.Mode = get(findobj(fig,'Tag','AutoPIE_Mode'),'Value');
 Opt.Group = get(findobj(fig,'Tag','AutoPIE_Group'),'Value') == 1;
 
-Res = AutoPIE_Core(PamMeta.MI_Hist,Chan,Opt);
+[Res,Pulses] = AutoPIE_Core(PamMeta.MI_Hist,Chan,Opt);
+%%% Laser pulses found, in ns
+Str = 'Laser pulses found:';
+for i = 1:numel(Pulses)
+    Str = sprintf('%s   %s at %.2f ns (%s)',Str,Pulses(i).Laser,Pulses(i).Time*Opt.Res,Pulses(i).Source);
+end
+if isempty(Pulses)
+    Str = 'No laser pulses found - check that the measurement is loaded.';
+end
+if isfinite(Opt.PeriodBins)
+    Str = sprintf('%s   |   period %.1f ns',Str,Opt.PeriodBins*Opt.Res);
+end
+set(findobj(fig,'Tag','AutoPIE_Pulses'),'String',Str,'TooltipString',Str);
 
 Data = cell(nChan,12);
 for k = 1:nChan
@@ -15398,7 +15413,7 @@ Update_Display([],[],0);
 Update_to_UserValues;
 
 %%% Core of Auto PIE (no GUI, no globals; see Auto_PIE)
-function Res = AutoPIE_Core(Hist, Chan, Opt)
+function [Res,Pulses] = AutoPIE_Core(Hist, Chan, Opt)
 %%% Proposes From/To microtime windows for all PIE channels.
 %%%
 %%% Hist : cell, microtime histogram per detector (PamMeta.MI_Hist)
@@ -15416,6 +15431,13 @@ function Res = AutoPIE_Core(Hist, Chan, Opt)
 %%%                     2: end where the decay is no longer 3 sigma above background
 %%%        Group      - true (default): channels with the same two letters
 %%%                     (RR1/RR2, par/perp) get one common window
+%%%
+%%% Pulses : laser rises found, per laser letter: Laser, Time [bins], Source
+%%%
+%%% Laser rises are found in the measurement itself (every peak that rises by
+%%% at least half its height within 1.5 ns). Saved IRF/buffer patterns with the
+%%% same number of TCSPC bins only pick which rise belongs to which laser, or
+%%% stand in when the data shows no rise for that laser.
 %%%
 %%% Rules: From = laser rise - Margin. To = earliest of (a) next laser rise
 %%% in the same detector - Margin and (b) the background cut-off of Opt.Mode.
@@ -15438,7 +15460,7 @@ end
 
 %%% Detector properties: valid microtime range and background per bin
 nDet = numel(Hist);
-Det = repmat(struct('H',[],'V',[0 0],'B',[],'Floor',0,'Ok',false),nDet,1);
+Det = repmat(struct('H',[],'V',[0 0],'B',[],'Floor',0,'Ok',false,'Rises',[]),nDet,1);
 for d = unique(Chan.Det(Chan.Det > 0))
     H = double(Hist{d}(:));
     n = numel(H);
@@ -15468,15 +15490,20 @@ for d = unique(Chan.Det(Chan.Det > 0))
         end
     end
     Det(d).H = H; Det(d).V = [v1 v2]; Det(d).B = B; Det(d).Floor = Floor; Det(d).Ok = true;
+    Det(d).Rises = AutoPIE_FirstPeriod(AutoPIE_Rises(H,[v1 v2],ws,Lb,Win),Opt.PeriodBins,Win);
 end
 
 %%% Laser rise per (laser letter, detector)
 LaserOn = NaN(26,nDet);
 LaserSrc = cell(26,nDet);
+LaserH = zeros(26,nDet);       %%% height of the rise in the data (0 = from a pattern)
+LaserAlt = NaN(26,nDet);       %%% rise of the saved IRF/buffer, if any
+AltSrc = cell(26,nDet);
 Color = repmat(' ',1,nDet);
 Li = @(c) double(c)-64;
 
-%%% 1) direct channels (BB, GG, RR, ...): saved IRF, then buffer, then data
+%%% 1) direct channels (BB, GG, RR, ...): rise in the data, chosen with the
+%%%    help of a saved IRF/buffer; the pattern alone if the data shows no rise
 for pass = 1:2
     for k = 1:nChan
         d = Chan.Det(k);
@@ -15493,10 +15520,33 @@ for pass = 1:2
         if ~isnan(LaserOn(L,d))
             continue;
         end
-        [On,Src] = AutoPIE_DirectRise(Det(d),Chan,find(Chan.Det == d & Ex == Ex(k)),ws,Lb,Win);
+        [On,Src,Height,Alt,AltName] = AutoPIE_DirectRise(Det(d),Chan,find(Chan.Det == d & Ex == Ex(k)),ws,Lb,Win,Opt.PeriodBins);
         if ~isnan(On)
-            LaserOn(L,d) = On; LaserSrc{L,d} = Src;
+            LaserOn(L,d) = On; LaserSrc{L,d} = Src; LaserH(L,d) = Height;
+            LaserAlt(L,d) = Alt; AltSrc{L,d} = AltName;
             if Color(d) == ' ', Color(d) = Ex(k); end
+        end
+    end
+end
+%%% Two lasers claiming the same rise (e.g. weak crosstalk of the blue pulse
+%%% in the red detector of a blue-only sample): the stronger rise keeps it,
+%%% the other laser falls back to its saved IRF/buffer or is not found
+[Ls,Ds] = find(isfinite(LaserOn));
+for i = 1:numel(Ls)
+    for j = 1:numel(Ls)
+        a = [Ls(i) Ds(i)]; b = [Ls(j) Ds(j)];
+        if a(1) == b(1) || ~isfinite(LaserOn(a(1),a(2))) || ~isfinite(LaserOn(b(1),b(2)))
+            continue;
+        end
+        if abs(LaserOn(a(1),a(2))-LaserOn(b(1),b(2))) <= 2*Win && LaserH(a(1),a(2)) < LaserH(b(1),b(2))
+            Other = char(b(1)+64);
+            if isfinite(LaserAlt(a(1),a(2))) && abs(LaserAlt(a(1),a(2))-LaserOn(b(1),b(2))) > 2*Win
+                LaserOn(a(1),a(2)) = LaserAlt(a(1),a(2));
+                LaserSrc{a(1),a(2)} = [AltSrc{a(1),a(2)} ' (rise in data belongs to laser ' Other ')'];
+                LaserH(a(1),a(2)) = 0;
+            else
+                LaserOn(a(1),a(2)) = NaN;
+            end
         end
     end
 end
@@ -15523,9 +15573,11 @@ Lasers = find(isfinite(tLaser))';
 for d = find([Det.Ok])
     for L = Lasers
         if isnan(LaserOn(L,d))
-            [On,Ok] = AutoPIE_Rise(Det(d).H,Det(d).V,tLaser(L)-Win,tLaser(L)+1.5*Win,ws,Lb);
-            if Ok && abs(On-tLaser(L)) <= Win
-                LaserOn(L,d) = On; LaserSrc{L,d} = 'data';
+            Rd = Det(d).Rises.On;
+            Near = find(Rd >= tLaser(L)-Win & Rd <= tLaser(L)+1.5*Win);
+            if ~isempty(Near)
+                [~,i] = min(abs(Rd(Near)-tLaser(L)));
+                LaserOn(L,d) = Rd(Near(i)); LaserSrc{L,d} = 'data';
             else
                 LaserOn(L,d) = round(tLaser(L)); LaserSrc{L,d} = 'other detectors';
             end
@@ -15533,7 +15585,18 @@ for d = find([Det.Ok])
     end
 end
 
+Pulses = struct('Laser',{},'Time',{},'Source',{});
+for L = Lasers
+    dd = find(isfinite(LaserOn(L,:)) & LaserH(L,:) >= 0);
+    Src = unique(LaserSrc(L,dd(Color(dd) == char(L+64))));
+    Pulses(end+1) = struct('Laser',char(L+64),'Time',tLaser(L),'Source',strjoin(Src,', ')); %#ok<AGROW>
+end
+
 %%% Windows, rule (a): from the laser rise to the next laser rise
+AllRises = [];
+for d = find([Det.Ok])
+    AllRises = [AllRises, Det(d).Rises.On]; %#ok<AGROW>
+end
 On = NaN(1,nChan); From = NaN(1,nChan); ToA = NaN(1,nChan); WhyA = cell(1,nChan);
 for k = 1:nChan
     d = Chan.Det(k);
@@ -15561,6 +15624,8 @@ for k = 1:nChan
     for L2 = find(isfinite(tGuess))'
         Next = [Next, tGuess(L2)+[0, Opt.PeriodBins, -Opt.PeriodBins]]; %#ok<AGROW>
     end
+    %%% every rise seen in any detector is a laser pulse, whatever the period says
+    Next = [Next, AllRises]; %#ok<AGROW>
     Next = Next(isfinite(Next) & Next > On(k)+Win);
     if isempty(Next)
         ToA(k) = v2; WhyA{k} = 'end of TAC range';
@@ -15638,58 +15703,107 @@ else %%% last bin 3 sigma above background
 end
 
 %%% Rise of the laser that excites the direct channels of a detector
-function [On,Src] = AutoPIE_DirectRise(Det,Chan,Ks,ws,Lb,Win)
-On = NaN; Src = '';
+function [On,Src,Height,Alt,AltSrc] = AutoPIE_DirectRise(Det,Chan,Ks,ws,Lb,Win,PeriodBins)
+On = NaN; Src = ''; Height = 0; Alt = NaN; AltSrc = '';
 n = numel(Det.H);
+Rd = Det.Rises; %%% sorted, strongest first
 Names = {'IRF','buffer'};
 Fields = {'IRF','Scatter'};
 for f = 1:2
     for k = Ks
         P = AutoPIE_Pattern(Chan.(Fields{f}),k,n);
-        if ~isempty(P)
-            [On,Ok] = AutoPIE_Rise(P,Det.V,Det.V(1),Det.V(2),ws,Lb);
-            if Ok
-                Src = Names{f};
-                %%% refine on the measurement itself (laser timing can drift)
-                [On2,Ok2] = AutoPIE_Rise(Det.H,Det.V,On-Win,On+1.5*Win,ws,Lb);
-                if Ok2 && abs(On2-On) <= Win
-                    On = On2; Src = [Src ' + data'];
-                end
+        if isempty(P)
+            continue;
+        end
+        Rp = AutoPIE_FirstPeriod(AutoPIE_Rises(P,Det.V,ws,Lb,Win),PeriodBins,Win);
+        if isempty(Rp.On)
+            continue;
+        end
+        Alt = Rp.On(1); AltSrc = Names{f};
+        %%% strongest rise in the data that matches a rise of the pattern
+        for i = 1:numel(Rd.On)
+            if any(abs(Rp.On-Rd.On(i)) <= 2*Win)
+                On = Rd.On(i); Height = Rd.Height(i);
+                Src = ['data (matches ' Names{f} ')'];
                 return;
             end
         end
+        if isempty(Rd.On)
+            On = Alt; Src = [Names{f} ' (no rise in data)'];
+            return;
+        end
+        break;
+    end
+    if ~isnan(Alt)
+        break;
     end
 end
-[On,Ok] = AutoPIE_Rise(Det.H,Det.V,Det.V(1),Det.V(2),ws,Lb);
-if Ok
-    Src = 'data';
-else
-    On = NaN;
+%%% no usable pattern, or the pattern does not match: strongest rise in the data
+if ~isempty(Rd.On)
+    On = Rd.On(1); Height = Rd.Height(1);
+    if isnan(Alt)
+        Src = 'data';
+    else
+        Src = ['data (saved ' AltSrc ' does not match)'];
+    end
 end
 
-%%% Finds the rise of the strongest peak between Lo and Hi
-function [On,Ok] = AutoPIE_Rise(V,VRange,Lo,Hi,ws,Lb)
-On = NaN; Ok = false;
+%%% The same laser fires again one period later (when the period is shorter
+%%% than the TAC range): a rise one period after another rise of at least a
+%%% third of its height is that same pulse; its height is given to the first
+%%% copy, so the first copy is chosen
+function R = AutoPIE_FirstPeriod(R,PeriodBins,Win)
+if ~isfinite(PeriodBins) || numel(R.On) < 2
+    return;
+end
+Keep = true(size(R.On));
+for i = 1:numel(R.On)
+    j = find(abs(R.On-(R.On(i)-PeriodBins)) <= 2*Win & R.Height >= R.Height(i)/3,1);
+    if ~isempty(j)
+        Keep(i) = false;
+        R.Height(j) = max(R.Height(j),R.Height(i));
+    end
+end
+R.On = R.On(Keep); R.Peak = R.Peak(Keep); R.Height = R.Height(Keep);
+[~,Order] = sort(R.Height,'descend');
+R.On = R.On(Order); R.Peak = R.Peak(Order); R.Height = R.Height(Order);
+
+%%% All laser rises in a histogram, strongest first: local maxima (+-1 ns)
+%%% that rise by at least half their height within 1.5 ns, which a decay
+%%% tail never does
+function R = AutoPIE_Rises(V,VRange,ws,Lb,Win)
+R = struct('On',zeros(1,0),'Peak',zeros(1,0),'Height',zeros(1,0));
 V = double(V(:));
-Lo = max(round(Lo),VRange(1)); Hi = min(round(Hi),VRange(2));
-if Hi-Lo < 3
+v1 = VRange(1); v2 = VRange(2);
+if v2-v1 < 3*Win
     return;
 end
-Floor = AutoPIE_FlatLevel(V,VRange(1),VRange(2),Lb);
+Floor = AutoPIE_FlatLevel(V,v1,v2,Lb);
 S = AutoPIE_Smooth(V,ws)-Floor;
-[Pk,j] = max(S(Lo:Hi));
-Peak = Lo+j-1;
 Sig = sqrt(max(Floor,1)/ws);
-%%% a real rise: well above noise and not just the tail of an earlier decay
-if Pk < 10*Sig || Peak <= Lo+1 || S(Lo) > 0.5*Pk
-    return;
+Back = round(1.5*Win);
+Cand = find(S(v1+1:v2-1) >= 10*Sig & S(v1+1:v2-1) >= S(v1:v2-2) & S(v1+1:v2-1) >= S(v1+2:v2))'+v1;
+for p = Cand
+    if ~isempty(R.Peak) && any(abs(R.Peak-p) <= Win)
+        continue; %%% same peak
+    end
+    if S(p) < max(S(max(v1,p-Win):min(v2,p+Win)))
+        continue; %%% not the maximum within +-1 ns
+    end
+    Base = min(S(max(v1,p-Back):p));
+    Height = S(p)-Base;
+    if Height < max(0.5*S(p),10*sqrt(max(Base+Floor,1)/ws))
+        continue; %%% no fast rise before this peak
+    end
+    Thr = Base+max(0.01*Height,3*Sig);
+    On = p;
+    while On > max(v1,p-Back) && S(On-1) > Thr
+        On = On-1;
+    end
+    R.On(end+1) = On; R.Peak(end+1) = p; R.Height(end+1) = Height;
 end
-Thr = max(0.01*Pk,3*Sig);
-On = Peak;
-while On > VRange(1) && S(On-1) > Thr
-    On = On-1;
-end
-Ok = true;
+[~,Order] = sort(R.Height,'descend');
+R.On = R.On(Order); R.Peak = R.Peak(Order); R.Height = R.Height(Order);
 
 %%% Flat (background) level: mean of the blocks at the lowest level
 function Level = AutoPIE_FlatLevel(V,v1,v2,L)
@@ -15733,7 +15847,6 @@ if sum(P) <= 0
     P = [];
     return;
 end
-if numel(P) < n
-    P(end+1:n) = 0;
+if numel(P) ~= n %%% saved with another number of TCSPC bins: another setup
+    P = [];
 end
-P = P(1:n);
