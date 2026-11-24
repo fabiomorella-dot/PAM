@@ -15248,6 +15248,13 @@ end
 uicontrol('Parent',fig,'Style','pushbutton','Units','normalized','FontSize',11,...
     'BackgroundColor',Look.Control,'ForegroundColor',Look.Fore,...
     'String','Recalculate','Callback',@(~,~) AutoPIE_Calculate(fig),'Position',[0.63 0.915 0.12 0.06]);
+uicontrol('Parent',fig,'Style','checkbox','Units','normalized','FontSize',11,...
+    'Tag','AutoPIE_Group','BackgroundColor',Look.Back,'ForegroundColor',Look.Fore,...
+    'String','Same window for par/perp','Value',1,...
+    'Callback',@(~,~) AutoPIE_Calculate(fig),'Position',[0.77 0.92 0.22 0.055],...
+    'TooltipString',sprintf(['Channels with the same two letters (RR1 and RR2, BB1 and BB2, ...)\n'...
+    'get one common window, cut on their summed decay.\n'...
+    'Needed for anisotropy, G-factor and lifetime analyses.']));
 uitable('Parent',fig,'Tag','AutoPIE_Table','Units','normalized','FontSize',10,...
     'ForegroundColor',Look.TableFore,'BackgroundColor',[Look.Table1;Look.Table2],...
     'ColumnName',{'Apply','PIE channel','Detector','Laser rise from','From','To','New From','New To',...
@@ -15311,6 +15318,7 @@ if ~isfinite(Opt.Margin) || Opt.Margin < 0
     set(findobj(fig,'Tag','AutoPIE_Margin'),'String','0.2');
 end
 Opt.Mode = get(findobj(fig,'Tag','AutoPIE_Mode'),'Value');
+Opt.Group = get(findobj(fig,'Tag','AutoPIE_Group'),'Value') == 1;
 
 Res = AutoPIE_Core(PamMeta.MI_Hist,Chan,Opt);
 
@@ -15406,6 +15414,8 @@ function Res = AutoPIE_Core(Hist, Chan, Opt)
 %%%        Margin     - gap before a laser rise [ns]
 %%%        Mode       - 1: end where S/sqrt(S+B) is best
 %%%                     2: end where the decay is no longer 3 sigma above background
+%%%        Group      - true (default): channels with the same two letters
+%%%                     (RR1/RR2, par/perp) get one common window
 %%%
 %%% Rules: From = laser rise - Margin. To = earliest of (a) next laser rise
 %%% in the same detector - Margin and (b) the background cut-off of Opt.Mode.
@@ -15523,7 +15533,8 @@ for d = find([Det.Ok])
     end
 end
 
-%%% Windows
+%%% Windows, rule (a): from the laser rise to the next laser rise
+On = NaN(1,nChan); From = NaN(1,nChan); ToA = NaN(1,nChan); WhyA = cell(1,nChan);
 for k = 1:nChan
     d = Chan.Det(k);
     if d == 0
@@ -15539,10 +15550,10 @@ for k = 1:nChan
         continue;
     end
     L = Li(Ex(k));
-    H = Det(d).H; B = Det(d).B; v1 = Det(d).V(1); v2 = Det(d).V(2);
-    On = LaserOn(L,d);
-    From = max(On-Margin,v1);
-    %%% rule (a): next laser rise in this detector, including the next period
+    v1 = Det(d).V(1); v2 = Det(d).V(2);
+    On(k) = LaserOn(L,d);
+    From(k) = max(On(k)-Margin,v1);
+    %%% next laser rise in this detector, including the next period
     Next = [];
     for L2 = Lasers
         Next = [Next, LaserOn(L2,d)+[0, Opt.PeriodBins, -Opt.PeriodBins]]; %#ok<AGROW>
@@ -15550,47 +15561,80 @@ for k = 1:nChan
     for L2 = find(isfinite(tGuess))'
         Next = [Next, tGuess(L2)+[0, Opt.PeriodBins, -Opt.PeriodBins]]; %#ok<AGROW>
     end
-    Next = Next(isfinite(Next) & Next > On+Win);
+    Next = Next(isfinite(Next) & Next > On(k)+Win);
     if isempty(Next)
-        ToA = v2; Why = 'end of TAC range';
+        ToA(k) = v2; WhyA{k} = 'end of TAC range';
     else
-        ToA = min(Next)-Margin-1; Why = 'next laser pulse';
-        if ToA >= v2
-            ToA = v2; Why = 'end of TAC range';
+        ToA(k) = min(Next)-Margin-1; WhyA{k} = 'next laser pulse';
+        if ToA(k) >= v2
+            ToA(k) = v2; WhyA{k} = 'end of TAC range';
         end
     end
-    if ToA <= From+5
+    if ToA(k) <= From(k)+5
         Res(k).Note = 'no room before the next laser pulse - not changed';
+        From(k) = NaN;
         continue;
     end
-    %%% rule (b): background cut-off
-    Idx = (From:ToA)';
-    C = cumsum(H(Idx)); Bc = cumsum(B(Idx)); S = C-Bc;
-    Hs = AutoPIE_Smooth(H,ws);
-    [~,p] = max(Hs(On:min(On+3*Win,ToA)));
-    q = On+p-1-From+1; %%% decay maximum, index into Idx
-    To = ToA;
-    if S(end) < max(5*sqrt(max(C(end),1)),0.05*Bc(end)) %%% no clear signal in this window
-        Why = [Why ' (no signal above background)'];
-    elseif Opt.Mode == 1
-        Snr = S./sqrt(max(C,1));
-        [~,j] = max(Snr(q:end));
-        if q+j-1 < numel(Idx)
-            To = Idx(q+j-1); Why = 'decay reaches background';
-        end
-    else
-        Lt = max(5,round(0.5/Opt.Res));
-        St = AutoPIE_Smooth(H-B,Lt);
-        Below = find(St(Idx(q):ToA) < 3*sqrt(max(B(Idx(q):ToA),1)/Lt),1);
-        if ~isempty(Below)
-            To = max(Idx(q)+Below-2,Idx(q)); Why = 'decay reaches background';
-        end
-    end
-    j = To-From+1;
-    Res(k).From = From; Res(k).To = To; Res(k).OK = true;
     Res(k).Laser = Ex(k); Res(k).Source = LaserSrc{L,d};
-    Res(k).Signal = S(j); Res(k).Background = Bc(j);
-    Res(k).Note = ['To: ' Why];
+end
+
+%%% Rule (b), per group: channels of the same laser/colour pair (RR1 and
+%%% RR2, i.e. par and perp) get one common window, cut on their summed decay
+Valid = find(isfinite(From));
+Done = false(1,nChan);
+for k = Valid
+    if Done(k)
+        continue;
+    end
+    if ~isfield(Opt,'Group') || Opt.Group
+        G = Valid(Ex(Valid) == Ex(k) & Em(Valid) == Em(k) & ~Done(Valid));
+    else
+        G = k;
+    end
+    Done(G) = true;
+    FromG = min(From(G));
+    [ToAG,j] = min(ToA(G));
+    H = 0; B = 0;
+    for g = G
+        H = H+Det(Chan.Det(g)).H; B = B+Det(Chan.Det(g)).B;
+    end
+    [To,Why] = AutoPIE_End(H,B,FromG,ToAG,min(On(G)),WhyA{G(j)},Opt,ws,Win);
+    if numel(G) > 1
+        Why = [Why ' (' strjoin(Chan.Name(G),' + ') ' together)'];
+    end
+    for g = G
+        Hg = Det(Chan.Det(g)).H; Bg = Det(Chan.Det(g)).B;
+        Res(g).From = FromG; Res(g).To = To; Res(g).OK = true;
+        Res(g).Background = sum(Bg(FromG:To));
+        Res(g).Signal = sum(Hg(FromG:To))-Res(g).Background;
+        Res(g).Note = ['To: ' Why];
+    end
+end
+
+%%% Rule (b): where the decay reaches the background, at most ToA
+function [To,Why] = AutoPIE_End(H,B,From,ToA,On,Why,Opt,ws,Win)
+Idx = (From:ToA)';
+C = cumsum(H(Idx)); Bc = cumsum(B(Idx)); S = C-Bc;
+Hs = AutoPIE_Smooth(H,ws);
+On = max(On,From);
+[~,p] = max(Hs(On:min(On+3*Win,ToA)));
+q = On+p-1-From+1; %%% decay maximum, index into Idx
+To = ToA;
+if S(end) < max(5*sqrt(max(C(end),1)),0.05*Bc(end)) %%% no clear signal in this window
+    Why = [Why ' (no signal above background)'];
+elseif Opt.Mode == 1 %%% best S/sqrt(S+B)
+    Snr = S./sqrt(max(C,1));
+    [~,j] = max(Snr(q:end));
+    if q+j-1 < numel(Idx)
+        To = Idx(q+j-1); Why = 'decay reaches background';
+    end
+else %%% last bin 3 sigma above background
+    Lt = max(5,round(0.5/Opt.Res));
+    St = AutoPIE_Smooth(H-B,Lt);
+    Below = find(St(Idx(q):ToA) < 3*sqrt(max(B(Idx(q):ToA),1)/Lt),1);
+    if ~isempty(Below)
+        To = max(Idx(q)+Below-2,Idx(q)); Why = 'decay reaches background';
+    end
 end
 
 %%% Rise of the laser that excites the direct channels of a detector
