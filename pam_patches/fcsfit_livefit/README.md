@@ -22,16 +22,16 @@ Fitting itself, the fit models and the results table are FCSFit's own and are no
 
 ## Install (once)
 
-1. Update this repository (`git pull`).
-2. Close FCSFit.
-3. In MATLAB, run:
+1. Close FCSFit.
+2. Save `FCSFit_LiveFit.m` and `apply_fcsfit_livefit.m` together in one folder. Your PAM program folder (the one with `PAM.m` and `FCSFit.m`) is fine.
+3. In MATLAB, go to that folder and run the installer with your PAM program folder, for example:
 
    ```matlab
-   cd <this repository>\pam_patches\fcsfit_livefit
-   apply_fcsfit_livefit
+   cd C:\Users\Rosario\Documents\MATLAB\PAM_current_with_3FCCS
+   apply_fcsfit_livefit(pwd)
    ```
 
-   A window asks for your **PAM program folder**, the one that contains `PAM.m` and `FCSFit.m` (your MATLAB PAM installation, not this repository). You can also give it directly: `apply_fcsfit_livefit('C:\path\to\PAM')`.
+   Without an argument, `apply_fcsfit_livefit` asks for the PAM folder in a window.
 4. Open FCSFit (from PAM or by typing `FCSFit`).
 
 The script:

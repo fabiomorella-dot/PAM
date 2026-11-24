@@ -32,8 +32,15 @@ function apply_fcsfit_livefit(pamFolder)
     end
     targetFolder = fileparts(target);
 
-    copyfile(fullfile(here, 'FCSFit_LiveFit.m'), fullfile(targetFolder, 'FCSFit_LiveFit.m'), 'f');
-    fprintf('copied FCSFit_LiveFit.m to %s\n', targetFolder);
+    source = fullfile(here, 'FCSFit_LiveFit.m');
+    destination = fullfile(targetFolder, 'FCSFit_LiveFit.m');
+    if ~isfile(source)
+        error('FCSFit_LiveFit.m must be in the same folder as apply_fcsfit_livefit.m (%s).', here);
+    end
+    if ~strcmpi(char(java.io.File(source).getCanonicalPath()), char(java.io.File(destination).getCanonicalPath()))
+        copyfile(source, destination, 'f');
+        fprintf('copied FCSFit_LiveFit.m to %s\n', targetFolder);
+    end
 
     fid = fopen(target, 'r', 'n', 'UTF-8');
     text = fread(fid, '*char')';
